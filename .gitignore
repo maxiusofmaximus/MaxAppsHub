@@ -1,0 +1,26 @@
+# Build outputs
+app/build/
+build/
+.gradle/
+
+# Local config
+local.properties
+
+# IDE
+.idea/
+.kotlin/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Parent project (this launcher lives temporarily inside the parent repo)
+android/
+docs/
+.github/
+.vscode/
+Ley_de_gases.html
