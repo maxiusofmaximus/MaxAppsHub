@@ -2,7 +2,7 @@
 
 **MaxApps Hub** es un launcher de Android diseñado para simplificar la gestión y actualización de tus aplicaciones APK alojadas en GitHub. Olvídate de descargar manualmente cada nueva versión; el Hub lo hace por ti.
 
-![Icono de la App](app/src/main/res/drawable/ic_launcher_foreground.xml) <!-- Nota: Android Studio renderiza esto, en GitHub se verá el código o puedes subir un PNG -->
+!📱(app/src/main/res/drawable/ic_launcher_foreground.xml) <!-- Nota: Android Studio renderiza esto, en GitHub se verá el código o puedes subir un PNG -->
 
 ## 🚀 ¿Qué hace MaxApps Hub?
 
