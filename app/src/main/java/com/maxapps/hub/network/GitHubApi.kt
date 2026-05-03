@@ -34,6 +34,7 @@ object GitHubApi {
                 val connection = url.openConnection() as HttpURLConnection
                 connection.requestMethod = "GET"
                 connection.setRequestProperty("Accept", "application/vnd.github+json")
+                connection.setRequestProperty("User-Agent", "MaxAppsHub-Launcher")
                 connection.connectTimeout = 10_000
                 connection.readTimeout = 10_000
 

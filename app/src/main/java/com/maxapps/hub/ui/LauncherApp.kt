@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
@@ -166,7 +167,7 @@ fun LauncherApp() {
                             downloadAndInstall(
                                 context = context,
                                 apkUrl = release.apkDownloadUrl,
-                                fileName = "${state.app.name.replace(" ", "_")}_${release.tagName}.apk",
+                                fileName = "FlashcardsQuimica_${release.tagName}.apk",
                                 onProgress = { progress ->
                                     appStates = appStates.toMutableList().also { list ->
                                         list[index] = list[index].copy(downloadProgress = progress)
@@ -513,8 +514,8 @@ fun downloadAndInstall(
     onError: (String) -> Unit
 ) {
     try {
-        // Delete previous file if exists
-        val downloadDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+        // Use a more accessible directory for external apps
+        val downloadDir = context.getExternalFilesDir(null) ?: context.filesDir
         val targetFile = File(downloadDir, fileName)
         if (targetFile.exists()) {
             targetFile.delete()
@@ -523,7 +524,7 @@ fun downloadAndInstall(
         val request = DownloadManager.Request(Uri.parse(apkUrl))
             .setTitle(fileName)
             .setDescription("Descargando actualización…")
-            .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, fileName)
+            .setDestinationUri(Uri.fromFile(targetFile))
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
 
         val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
@@ -607,6 +608,17 @@ fun downloadAndInstall(
  * Opens the system installer for the given APK file.
  */
 fun installApk(context: Context, file: File) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (!context.packageManager.canRequestPackageInstalls()) {
+            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                data = Uri.parse("package:${context.packageName}")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+            Toast.makeText(context, "Por favor autoriza la instalación de aplicaciones", Toast.LENGTH_LONG).show()
+            return
+        }
+    }
     try {
         val uri = FileProvider.getUriForFile(
             context,
