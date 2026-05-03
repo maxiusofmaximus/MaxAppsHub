@@ -1,0 +1,27 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Hub/Circle representing connection -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,30C40.7,30 30,40.7 30,54C30,67.3 40.7,78 54,78C67.3,78 78,67.3 78,54C78,40.7 67.3,30 54,30ZM54,70C45.2,70 38,62.8 38,54C38,45.2 45.2,38 54,38C62.8,38 70,45.2 70,54C70,62.8 62.8,70 54,70Z" />
+    <!-- Android Rocket/App representaiton -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,42L48,54L54,66L60,54L54,42Z" />
+    <!-- Pulse/Sync lines -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M82,53L88,53L88,55L82,55Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M20,53L26,53L26,55L20,55Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M53,20L53,26L55,26L55,20Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M53,82L53,88L55,88L55,82Z" />
+</vector>
