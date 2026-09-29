@@ -27,6 +27,15 @@ object AppRegistry {
             icon = "🧪",
             description = "Tarjetas de estudio interactivas sobre la Ley de Gases, con modo examen y repaso.",
             accentColorHex = 0xFF6366F1
+        ),
+        ManagedApp(
+            name = "Atlas OS",
+            packageId = "com.opencode-os.app",
+            githubOwner = "maxiusofmaximus",
+            githubRepo = "atlas-os",
+            icon = "🛰️",
+            description = "Agent Engineering Operating System — orquesta swarms de agentes de código IA con HUD Mission Control.",
+            accentColorHex = 0xFF8B5CF6
         )
     )
 }
