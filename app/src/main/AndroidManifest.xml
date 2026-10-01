@@ -6,6 +6,7 @@
 
     <queries>
         <package android:name="com.flashcards.quimica" />
+        <package android:name="com.opencode_os.app" />
     </queries>
 
     <application

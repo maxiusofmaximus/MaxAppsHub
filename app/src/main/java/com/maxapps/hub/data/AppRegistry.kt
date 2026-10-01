@@ -30,7 +30,7 @@ object AppRegistry {
         ),
         ManagedApp(
             name = "Atlas OS",
-            packageId = "com.opencode-os.app",
+            packageId = "com.opencode_os.app",
             githubOwner = "maxiusofmaximus",
             githubRepo = "atlas-os",
             icon = "🛰️",
