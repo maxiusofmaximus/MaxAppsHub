@@ -33,6 +33,8 @@ Este proyecto nació de la necesidad de mantener aplicaciones personalizadas sie
 
 ## 🧪 Aplicaciones Gestionadas Actualmente
 -   **Ley de Gases (Flashcards Química)**: [Repo de la App](https://github.com/maxiusofmaximus/APK-Android-Ley-de-Gases)
+-   **Atlas OS**: [Repo de la App](https://github.com/maxiusofmaximus/atlas-os)
+-   **Herdr Notify**: [Repo de la App](https://github.com/maxiusofmaximus/herdr-notify)
 
 ---
 Desarrollado con ❤️ para maximizar la productividad en Android.

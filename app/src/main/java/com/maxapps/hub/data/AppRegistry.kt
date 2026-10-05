@@ -36,6 +36,15 @@ object AppRegistry {
             icon = "🛰️",
             description = "Agent Engineering Operating System — orquesta swarms de agentes de código IA con HUD Mission Control.",
             accentColorHex = 0xFF8B5CF6
+        ),
+        ManagedApp(
+            name = "Herdr Notify",
+            packageId = "dev.herdrnotify.app",
+            githubOwner = "maxiusofmaximus",
+            githubRepo = "herdr-notify",
+            icon = "🔔",
+            description = "Monitoreo en tiempo real y acciones remotas para agentes herdr.",
+            accentColorHex = 0xFF10B981
         )
     )
 }
