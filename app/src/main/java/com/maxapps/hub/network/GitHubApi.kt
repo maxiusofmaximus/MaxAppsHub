@@ -1,7 +1,9 @@
 package com.maxapps.hub.network
 
+import com.maxapps.hub.data.Version
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -14,7 +16,8 @@ data class ReleaseInfo(
     val releaseName: String,
     val apkDownloadUrl: String,
     val apkFileName: String,
-    val apkSize: Long
+    val apkSize: Long,
+    val prerelease: Boolean
 )
 
 /**
@@ -24,50 +27,61 @@ data class ReleaseInfo(
 object GitHubApi {
 
     /**
-     * Fetches the latest release for a given GitHub repository.
-     * Returns null if no release is found or if the request fails.
+     * Canal estable: la release "latest" de GitHub (nunca una prerelease).
+     * Canal alfa: la de mayor versión semver entre las no borradores, prereleases incluidas.
+     * Devuelve null si no hay una release con APK o si la petición falla.
      */
-    suspend fun fetchLatestRelease(owner: String, repo: String): ReleaseInfo? =
+    suspend fun fetchRelease(owner: String, repo: String, includePrereleases: Boolean): ReleaseInfo? =
         withContext(Dispatchers.IO) {
             try {
-                val url = URL("https://api.github.com/repos/$owner/$repo/releases/latest")
-                val connection = url.openConnection() as HttpURLConnection
-                connection.requestMethod = "GET"
-                connection.setRequestProperty("Accept", "application/vnd.github+json")
-                connection.setRequestProperty("User-Agent", "MaxAppsHub-Launcher")
-                connection.connectTimeout = 10_000
-                connection.readTimeout = 10_000
-
-                if (connection.responseCode != 200) {
-                    return@withContext null
+                val base = "https://api.github.com/repos/$owner/$repo/releases"
+                if (includePrereleases) {
+                    newestRelease(JSONArray(get("$base?per_page=15") ?: return@withContext null))
+                } else {
+                    get("$base/latest")?.let { JSONObject(it).toReleaseInfo() }
                 }
-
-                val json = connection.inputStream.bufferedReader().use { it.readText() }
-                val release = JSONObject(json)
-
-                val tagName = release.getString("tag_name")
-                val releaseName = release.optString("name", tagName)
-
-                // Find the first APK asset
-                val assets = release.getJSONArray("assets")
-                for (i in 0 until assets.length()) {
-                    val asset = assets.getJSONObject(i)
-                    val name = asset.getString("name")
-                    if (name.endsWith(".apk")) {
-                        return@withContext ReleaseInfo(
-                            tagName = tagName,
-                            releaseName = releaseName,
-                            apkDownloadUrl = asset.getString("browser_download_url"),
-                            apkFileName = name,
-                            apkSize = asset.getLong("size")
-                        )
-                    }
-                }
-
-                null
             } catch (e: Exception) {
                 e.printStackTrace()
                 null
             }
         }
+
+    private fun get(url: String): String? {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        connection.requestMethod = "GET"
+        connection.setRequestProperty("Accept", "application/vnd.github+json")
+        connection.setRequestProperty("User-Agent", "MaxAppsHub-Launcher")
+        connection.connectTimeout = 10_000
+        connection.readTimeout = 10_000
+        if (connection.responseCode != 200) return null
+        return connection.inputStream.bufferedReader().use { it.readText() }
+    }
+
+    private fun newestRelease(releases: JSONArray): ReleaseInfo? =
+        (0 until releases.length())
+            .map { releases.getJSONObject(it) }
+            .filter { !it.optBoolean("draft", false) }
+            .mapNotNull { json -> json.toReleaseInfo()?.let { r -> Version.parse(r.tagName)?.let { it to r } } }
+            .maxByOrNull { it.first }?.second
+
+    /** Null si la release no tiene ningún asset .apk. */
+    private fun JSONObject.toReleaseInfo(): ReleaseInfo? {
+        val tagName = getString("tag_name")
+        val assets = getJSONArray("assets")
+        for (i in 0 until assets.length()) {
+            val asset = assets.getJSONObject(i)
+            val name = asset.getString("name")
+            if (name.endsWith(".apk")) {
+                return ReleaseInfo(
+                    tagName = tagName,
+                    releaseName = optString("name", tagName),
+                    apkDownloadUrl = asset.getString("browser_download_url"),
+                    apkFileName = name,
+                    apkSize = asset.getLong("size"),
+                    prerelease = optBoolean("prerelease", false)
+                )
+            }
+        }
+        return null
+    }
 }

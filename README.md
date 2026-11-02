@@ -17,6 +17,11 @@ Este proyecto nació de la necesidad de mantener aplicaciones personalizadas sie
 -   **Instalación Fluida**: Una vez terminada la descarga, el Hub abre automáticamente el instalador del sistema.
 -   **Gestor de Permisos**: Si no has autorizado la instalación de aplicaciones desconocidas, el Hub te guiará directamente a la pantalla de ajustes del sistema.
 
+## 🛠️ Mejoras Recientes (v1.0.4)
+
+-   **Canal alfa por app**: el interruptor «Incluir alfas» muestra también los prelanzamientos, comparados como semver (`1.0.5-alpha.2` < `1.0.5`).
+-   **CLI por adb**: maneja el Hub desde el PC sin tocar la pantalla (ver «CLI» abajo).
+
 ## 🛠️ Mejoras Recientes (v1.0.2)
 
 -   **APK Firmado**: Solucionado el error de "Paquete no válido" mediante el firmado digital del APK de release.
@@ -30,6 +35,27 @@ Este proyecto nació de la necesidad de mantener aplicaciones personalizadas sie
 2.  Descarga el archivo `app-release.apk` de la versión más reciente.
 3.  Ábrelo en tu dispositivo Android e instálalo.
 4.  ¡Empieza a gestionar tus apps favoritas!
+
+## ⌨️ CLI
+
+Requisitos: `adb` y el móvil con depuración USB. Desde `cli/`:
+
+```powershell
+.\mah.ps1 list                        # estado de todas las apps
+.\mah.ps1 channel com.flashcards.quimica alfa   # alfa | estable
+.\mah.ps1 check [pkg]                 # consulta GitHub
+.\mah.ps1 update com.opencode_os.app --confirm  # descarga e instala
+.\mah.ps1 status                      # progreso de la última descarga
+```
+
+`mah.sh` es el mismo comando para bash (llama a `mah.ps1`). Variables: `ADB` (ruta a adb) y `ANDROID_SERIAL` (dispositivo).
+
+Funciona con `adb shell am broadcast` hacia `CliReceiver`, protegido con `android.permission.DUMP` (solo adb lo posee). Cada comando escribe `cli-result.json` en el almacenamiento de la app, y el cliente espera a que cambie.
+
+Limitaciones:
+-   Android exige confirmar cada instalación. `--confirm` pulsa «Instalar»/«Actualizar» en el instalador vía `uiautomator`; sin esa opción, confírmala en el móvil.
+-   `update` descarga en segundo plano. Si el sistema mata el proceso de la app antes de terminar la descarga, no se abre el instalador: repite el comando.
+-   La pantalla del Hub no se refresca sola con cambios hechos por CLI; ábrela de nuevo o pulsa «Buscar».
 
 ## 🧪 Aplicaciones Gestionadas Actualmente
 -   **Ley de Gases (Flashcards Química)**: [Repo de la App](https://github.com/maxiusofmaximus/APK-Android-Ley-de-Gases)

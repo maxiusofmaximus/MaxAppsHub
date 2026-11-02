@@ -12,8 +12,8 @@ android {
         applicationId = "com.maxapps.hub"
         minSdk = 24
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 5
+        versionName = "1.0.4"
     }
 
     compileOptions {
@@ -54,4 +54,6 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material:material-icons-extended")
+
+    testImplementation("junit:junit:4.13.2")
 }

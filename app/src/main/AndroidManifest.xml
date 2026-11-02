@@ -7,6 +7,7 @@
     <queries>
         <package android:name="com.flashcards.quimica" />
         <package android:name="com.opencode_os.app" />
+        <package android:name="dev.herdrnotify.app" />
     </queries>
 
     <application
@@ -37,6 +38,15 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <receiver
+            android:name=".CliReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="com.maxapps.hub.CLI" />
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>

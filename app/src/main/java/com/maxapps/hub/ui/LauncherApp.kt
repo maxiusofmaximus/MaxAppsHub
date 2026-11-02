@@ -1,16 +1,5 @@
 package com.maxapps.hub.ui
 
-import android.app.DownloadManager
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.content.pm.PackageManager
-import android.net.Uri
-import android.os.Build
-import android.os.Environment
-import android.provider.Settings
-import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -32,26 +21,46 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.FileProvider
 import com.maxapps.hub.data.AppRegistry
+import com.maxapps.hub.data.HubPrefs
 import com.maxapps.hub.data.ManagedApp
+import com.maxapps.hub.data.isNewerVersion
+import com.maxapps.hub.install.downloadAndInstall
+import com.maxapps.hub.install.getInstalledVersion
 import com.maxapps.hub.network.GitHubApi
 import com.maxapps.hub.network.ReleaseInfo
 import com.maxapps.hub.ui.theme.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.io.File
+
+private const val HUB_OWNER = "maxiusofmaximus"
+private const val HUB_REPO = "maxappshub"
+
+// State for the launcher's own update
+data class HubUpdateState(
+    val installedVersion: String? = null,
+    val latestRelease: ReleaseInfo? = null,
+    val isLoading: Boolean = false,
+    val isDownloading: Boolean = false,
+    val downloadProgress: Float = 0f,
+    val error: String? = null,
+    val checked: Boolean = false
+)
 
 // State for each managed app
 data class AppState(
     val app: ManagedApp,
     val installedVersion: String? = null,
     val latestRelease: ReleaseInfo? = null,
+    val includePrereleases: Boolean = false,
     val isLoading: Boolean = true,
     val isDownloading: Boolean = false,
     val downloadProgress: Float = 0f,
     val error: String? = null
 )
+
+private fun List<AppState>.updated(index: Int, transform: (AppState) -> AppState): List<AppState> =
+    toMutableList().also { it[index] = transform(it[index]) }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,21 +74,60 @@ fun LauncherApp() {
             AppRegistry.apps.map { app ->
                 AppState(
                     app = app,
-                    installedVersion = getInstalledVersion(context, app.packageId)
+                    installedVersion = getInstalledVersion(context, app.packageId),
+                    includePrereleases = HubPrefs.includePrereleases(context, app.packageId)
                 )
             }
         )
     }
 
+    var hubState by remember {
+        mutableStateOf(
+            HubUpdateState(installedVersion = getInstalledVersion(context, context.packageName))
+        )
+    }
+
+    fun checkHubUpdate() {
+        scope.launch {
+            hubState = hubState.copy(isLoading = true, error = null)
+            val release = GitHubApi.fetchRelease(HUB_OWNER, HUB_REPO, includePrereleases = false)
+            hubState = hubState.copy(
+                latestRelease = release,
+                installedVersion = getInstalledVersion(context, context.packageName),
+                isLoading = false,
+                checked = true,
+                error = if (release == null) "No se pudo obtener información" else null
+            )
+        }
+    }
+
+    fun refreshApp(index: Int) {
+        scope.launch {
+            appStates = appStates.updated(index) { it.copy(isLoading = true, error = null) }
+            val current = appStates[index]
+            val release = GitHubApi.fetchRelease(current.app.githubOwner, current.app.githubRepo, current.includePrereleases)
+            appStates = appStates.updated(index) {
+                it.copy(
+                    latestRelease = release,
+                    isLoading = false,
+                    installedVersion = getInstalledVersion(context, it.app.packageId),
+                    error = if (release == null) "No se pudo obtener información" else null
+                )
+            }
+        }
+    }
+
     // Fetch latest releases on launch
     LaunchedEffect(Unit) {
+        checkHubUpdate()
         appStates = appStates.map { state ->
             state.copy(isLoading = true)
         }
         appStates = appStates.map { state ->
-            val release = GitHubApi.fetchLatestRelease(
+            val release = GitHubApi.fetchRelease(
                 state.app.githubOwner,
-                state.app.githubRepo
+                state.app.githubRepo,
+                state.includePrereleases
             )
             state.copy(
                 latestRelease = release,
@@ -155,6 +203,33 @@ fun LauncherApp() {
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                HubUpdateCard(
+                    state = hubState,
+                    isDark = isDark,
+                    onCheck = { checkHubUpdate() },
+                    onUpdate = {
+                        hubState.latestRelease?.let { release ->
+                            hubState = hubState.copy(isDownloading = true, downloadProgress = 0f, error = null)
+                            downloadAndInstall(
+                                context = context,
+                                apkUrl = release.apkDownloadUrl,
+                                fileName = release.apkFileName,
+                                onProgress = { progress ->
+                                    hubState = hubState.copy(downloadProgress = progress)
+                                },
+                                onComplete = {
+                                    hubState = hubState.copy(
+                                        isDownloading = false,
+                                        installedVersion = getInstalledVersion(context, context.packageName)
+                                    )
+                                },
+                                onError = { error ->
+                                    hubState = hubState.copy(isDownloading = false, error = error)
+                                }
+                            )
+                        }
+                    }
+                )
                 appStates.forEachIndexed { index, state ->
                     AppCard(
                         state = state,
@@ -167,7 +242,7 @@ fun LauncherApp() {
                             downloadAndInstall(
                                 context = context,
                                 apkUrl = release.apkDownloadUrl,
-                                fileName = "FlashcardsQuimica_${release.tagName}.apk",
+                                fileName = release.apkFileName,
                                 onProgress = { progress ->
                                     appStates = appStates.toMutableList().also { list ->
                                         list[index] = list[index].copy(downloadProgress = progress)
@@ -197,24 +272,11 @@ fun LauncherApp() {
                                 context.startActivity(intent)
                             }
                         },
-                        onRefresh = {
-                            scope.launch {
-                                appStates = appStates.toMutableList().also { list ->
-                                    list[index] = state.copy(isLoading = true, error = null)
-                                }
-                                val release = GitHubApi.fetchLatestRelease(
-                                    state.app.githubOwner,
-                                    state.app.githubRepo
-                                )
-                                appStates = appStates.toMutableList().also { list ->
-                                    list[index] = list[index].copy(
-                                        latestRelease = release,
-                                        isLoading = false,
-                                        installedVersion = getInstalledVersion(context, state.app.packageId),
-                                        error = if (release == null) "No se pudo obtener información" else null
-                                    )
-                                }
-                            }
+                        onRefresh = { refreshApp(index) },
+                        onTogglePrereleases = { enabled ->
+                            HubPrefs.setIncludePrereleases(context, state.app.packageId, enabled)
+                            appStates = appStates.updated(index) { it.copy(includePrereleases = enabled) }
+                            refreshApp(index)
                         }
                     )
                 }
@@ -224,7 +286,7 @@ fun LauncherApp() {
 
             // Footer
             Text(
-                text = "MaxApps Hub v1.0.0",
+                text = "MaxApps Hub v${getInstalledVersion(context, context.packageName) ?: "—"}",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                 textAlign = TextAlign.Center,
@@ -237,17 +299,225 @@ fun LauncherApp() {
 }
 
 @Composable
+fun HubUpdateCard(
+    state: HubUpdateState,
+    isDark: Boolean,
+    onCheck: () -> Unit,
+    onUpdate: () -> Unit
+) {
+    val accentColor = Indigo
+    val latestTag = state.latestRelease?.tagName
+    val hasUpdate = latestTag != null &&
+            state.installedVersion != null &&
+            isNewerVersion(latestTag, state.installedVersion)
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isDark) DarkSurfaceVariant else LightSurfaceVariant
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(
+                            Brush.linearGradient(
+                                colors = listOf(accentColor, accentColor.copy(alpha = 0.6f))
+                            )
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("📱", fontSize = 28.sp)
+                }
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "MaxApps Hub",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Launcher de aplicaciones",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 18.sp
+                    )
+                }
+
+                IconButton(onClick = onCheck) {
+                    Icon(
+                        Icons.Default.Refresh,
+                        contentDescription = "Buscar actualizaciones",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.background.copy(alpha = 0.6f))
+                    .padding(12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        text = "Instalada",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        letterSpacing = 1.sp
+                    )
+                    Text(
+                        text = state.installedVersion ?: "—",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Emerald
+                    )
+                }
+
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = "Última",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        letterSpacing = 1.sp
+                    )
+                    if (state.isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = accentColor
+                        )
+                    } else {
+                        Text(
+                            text = latestTag ?: "—",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (hasUpdate) Pink else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            if (state.isDownloading) {
+                Column {
+                    LinearProgressIndicator(
+                        progress = { state.downloadProgress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp)),
+                        color = accentColor,
+                        trackColor = MaterialTheme.colorScheme.outline
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Descargando… ${(state.downloadProgress * 100).toInt()}%",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+
+            if (state.error != null && !state.isLoading && !state.isDownloading) {
+                Text(
+                    text = "⚠️ ${state.error}",
+                    fontSize = 13.sp,
+                    color = Color(0xFFEF4444),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            if (!state.isDownloading) {
+                if (hasUpdate) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Button(
+                            onClick = onUpdate,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = accentColor)
+                        ) {
+                            Icon(
+                                Icons.Default.KeyboardArrowUp,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Actualizar Hub", fontWeight = FontWeight.Bold)
+                        }
+                        OutlinedButton(
+                            onClick = onCheck,
+                            modifier = Modifier.height(48.dp),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Text("Buscar", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                } else {
+                    Button(
+                        onClick = onCheck,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = accentColor)
+                    ) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (state.checked && state.error == null) "Estás en la última versión" else "Buscar actualizaciones",
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun AppCard(
     state: AppState,
     isDark: Boolean,
     onInstall: () -> Unit,
     onOpen: () -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onTogglePrereleases: (Boolean) -> Unit
 ) {
     val accentColor = Color(state.app.accentColorHex)
     val hasUpdate = state.installedVersion != null &&
             state.latestRelease != null &&
-            state.installedVersion != state.latestRelease.tagName.removePrefix("v")
+            isNewerVersion(state.latestRelease.tagName, state.installedVersion)
     val isInstalled = state.installedVersion != null
     val isUpToDate = isInstalled && !hasUpdate
 
@@ -359,6 +629,22 @@ fun AppCard(
                         )
                     }
                 }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Canal de actualización
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Incluir alfas",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                Switch(checked = state.includePrereleases, onCheckedChange = onTogglePrereleases)
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -482,155 +768,5 @@ fun AppCard(
                 }
             }
         }
-    }
-}
-
-/**
- * Gets the installed version of a package, or null if not installed.
- */
-fun getInstalledVersion(context: Context, packageId: String): String? {
-    return try {
-        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.packageManager.getPackageInfo(packageId, PackageManager.PackageInfoFlags.of(0))
-        } else {
-            @Suppress("DEPRECATION")
-            context.packageManager.getPackageInfo(packageId, 0)
-        }
-        info.versionName
-    } catch (e: PackageManager.NameNotFoundException) {
-        null
-    }
-}
-
-/**
- * Downloads an APK using DownloadManager and triggers installation when complete.
- */
-fun downloadAndInstall(
-    context: Context,
-    apkUrl: String,
-    fileName: String,
-    onProgress: (Float) -> Unit,
-    onComplete: () -> Unit,
-    onError: (String) -> Unit
-) {
-    try {
-        // Use a more accessible directory for external apps
-        val downloadDir = context.getExternalFilesDir(null) ?: context.filesDir
-        val targetFile = File(downloadDir, fileName)
-        if (targetFile.exists()) {
-            targetFile.delete()
-        }
-
-        val request = DownloadManager.Request(Uri.parse(apkUrl))
-            .setTitle(fileName)
-            .setDescription("Descargando actualización…")
-            .setDestinationUri(Uri.fromFile(targetFile))
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
-
-        val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        val downloadId = downloadManager.enqueue(request)
-
-        // Monitor download progress
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(ctx: Context, intent: Intent) {
-                val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
-                if (id == downloadId) {
-                    context.unregisterReceiver(this)
-                    
-                    val query = DownloadManager.Query().setFilterById(downloadId)
-                    val cursor = downloadManager.query(query)
-                    if (cursor.moveToFirst()) {
-                        val statusIdx = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
-                        val status = cursor.getInt(statusIdx)
-                        if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                            onProgress(1f)
-                            onComplete()
-                            // Trigger install
-                            installApk(context, targetFile)
-                        } else {
-                            onError("La descarga falló")
-                        }
-                    }
-                    cursor.close()
-                }
-            }
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(
-                receiver,
-                IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
-                Context.RECEIVER_EXPORTED
-            )
-        } else {
-            @Suppress("UnspecifiedRegisterReceiverFlag")
-            context.registerReceiver(
-                receiver,
-                IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
-            )
-        }
-
-        // Poll for progress updates
-        Thread {
-            var downloading = true
-            while (downloading) {
-                val query = DownloadManager.Query().setFilterById(downloadId)
-                val cursor = downloadManager.query(query)
-                if (cursor.moveToFirst()) {
-                    val statusIdx = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
-                    val bytesIdx = cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
-                    val totalIdx = cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
-
-                    val status = cursor.getInt(statusIdx)
-                    val bytesDownloaded = cursor.getLong(bytesIdx)
-                    val totalBytes = cursor.getLong(totalIdx)
-
-                    if (totalBytes > 0) {
-                        onProgress(bytesDownloaded.toFloat() / totalBytes.toFloat())
-                    }
-
-                    if (status == DownloadManager.STATUS_SUCCESSFUL ||
-                        status == DownloadManager.STATUS_FAILED) {
-                        downloading = false
-                    }
-                }
-                cursor.close()
-                Thread.sleep(300)
-            }
-        }.start()
-
-    } catch (e: Exception) {
-        onError("Error: ${e.message}")
-    }
-}
-
-/**
- * Opens the system installer for the given APK file.
- */
-fun installApk(context: Context, file: File) {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        if (!context.packageManager.canRequestPackageInstalls()) {
-            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
-                data = Uri.parse("package:${context.packageName}")
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            context.startActivity(intent)
-            Toast.makeText(context, "Por favor autoriza la instalación de aplicaciones", Toast.LENGTH_LONG).show()
-            return
-        }
-    }
-    try {
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            file
-        )
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/vnd.android.package-archive")
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
-        }
-        context.startActivity(intent)
-    } catch (e: Exception) {
-        Toast.makeText(context, "No se pudo abrir el instalador: ${e.message}", Toast.LENGTH_LONG).show()
     }
 }
