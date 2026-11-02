@@ -51,12 +51,12 @@ object CliCommands {
     @Volatile
     private var lastJob: UpdateJob? = null
 
-    suspend fun run(context: Context, cmd: String, pkg: String?, value: String?): JSONObject =
+    suspend fun run(context: Context, cmd: String, pkg: String?, value: String?, force: Boolean = false): JSONObject =
         when (cmd) {
             "list" -> JSONObject().put("apps", checkApps(context, null))
             "check" -> JSONObject().put("apps", checkApps(context, pkg))
             "channel" -> setChannel(context, pkg, value)
-            "update" -> startUpdate(context, pkg)
+            "update" -> startUpdate(context, pkg, force)
             "status" -> lastJob?.toJson() ?: JSONObject().put("state", "idle")
             else -> throw CliError("cmd desconocido: '$cmd' (list|check|channel|update|status)")
         }
@@ -92,14 +92,15 @@ object CliCommands {
         return JSONObject().put("packageId", app.packageId).put("channel", channelName(alfa))
     }
 
-    private suspend fun startUpdate(context: Context, pkg: String?): JSONObject {
+    /** `force` salta la comparación de versiones: instala la release del canal aunque la instalada parezca igual o mayor (p. ej. una build de pruebas 1.0.5 frente a 1.0.5-alpha.1). Android sigue rechazando bajar de versionCode. */
+    private suspend fun startUpdate(context: Context, pkg: String?, force: Boolean): JSONObject {
         val app = appFor(pkg)
         val alfa = HubPrefs.includePrereleases(context, app.packageId)
         val release = GitHubApi.fetchRelease(app.githubOwner, app.githubRepo, alfa)
             ?: throw CliError("no hay APK disponible en el canal ${channelName(alfa)}")
         val installed = getInstalledVersion(context, app.packageId)
-        if (installed != null && !isNewerVersion(release.tagName, installed)) {
-            throw CliError("ya tienes la última versión del canal (${release.tagName})")
+        if (!force && installed != null && !isNewerVersion(release.tagName, installed)) {
+            throw CliError("ya tienes la última versión del canal (${release.tagName}); usa --force para reinstalar")
         }
 
         lastJob = UpdateJob(app.packageId, release.tagName, "descargando", 0f, null)

@@ -2,7 +2,7 @@
 #   mah list
 #   mah channel <pkg> alfa|estable
 #   mah check [pkg]
-#   mah update <pkg> [--confirm]
+#   mah update <pkg> [--confirm] [--force]
 #   mah status
 # Variables: ADB (ruta a adb), ANDROID_SERIAL (dispositivo).
 
@@ -109,7 +109,8 @@ function Confirm-Installer {
 
 $argv = @($args)
 $confirm = [bool]($argv | Where-Object { $_ -in '--confirm', '-confirm' })
-$pos = @($argv | Where-Object { $_ -notin '--confirm', '-confirm' })
+$force = [bool]($argv | Where-Object { $_ -in '--force', '-force' })
+$pos = @($argv | Where-Object { $_ -notin '--confirm', '-confirm', '--force', '-force' })
 $cmd = if ($pos.Count -gt 0) { $pos[0] } else { 'help' }
 
 switch ($cmd) {
@@ -128,8 +129,8 @@ switch ($cmd) {
         Write-Host "Canal de $($data.packageId): $($data.channel)"
     }
     'update' {
-        if ($pos.Count -lt 2) { Fail 'Uso: mah update <pkg> [--confirm]' }
-        $data = Show-Result (Invoke-Cli 'update' @{ pkg = $pos[1] } 30)
+        if ($pos.Count -lt 2) { Fail 'Uso: mah update <pkg> [--confirm] [--force]' }
+        $data = Show-Result (Invoke-Cli 'update' @{ pkg = $pos[1]; force = $(if ($force) { '1' } else { '0' }) } 30)
         Write-Host "Descarga lanzada: $($data.packageId) $($data.version)"
         if ($confirm) { Confirm-Installer }
         else { Write-Host 'Sigue el progreso con «mah status». El instalador del sistema pide confirmación en el móvil.' }
@@ -143,7 +144,7 @@ switch ($cmd) {
 mah list                         estado de todas las apps (canal, instalada, última)
 mah channel <pkg> alfa|estable   cambia el canal de una app
 mah check [pkg]                  consulta GitHub (todas o una)
-mah update <pkg> [--confirm]     descarga e instala; --confirm pulsa Instalar/Actualizar
+mah update <pkg> [--confirm] [--force]     descarga e instala; --confirm pulsa Instalar/Actualizar; --force salta la comparación de versiones
 mah status                       progreso de la última descarga/instalación
 '@
     }

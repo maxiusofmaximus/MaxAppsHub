@@ -24,7 +24,10 @@ class CliReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val result = runCatching {
-                    CliCommands.run(context, cmd, intent.getStringExtra("pkg"), intent.getStringExtra("value"))
+                    CliCommands.run(
+                        context, cmd, intent.getStringExtra("pkg"), intent.getStringExtra("value"),
+                        force = intent.getStringExtra("force") == "1"
+                    )
                 }
                 writeResult(context, cmd, result)
             } catch (e: Exception) {
