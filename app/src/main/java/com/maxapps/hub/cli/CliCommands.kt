@@ -20,7 +20,7 @@ class CliError(message: String) : Exception(message)
 data class UpdateJob(
     val packageId: String,
     val version: String,
-    val state: String, // descargando | instalador | error
+    val state: String, // descargando | instalador | hecho | error
     val progress: Float,
     val error: String?
 ) {
@@ -57,9 +57,17 @@ object CliCommands {
             "check" -> JSONObject().put("apps", checkApps(context, pkg))
             "channel" -> setChannel(context, pkg, value)
             "update" -> startUpdate(context, pkg, force)
-            "status" -> lastJob?.toJson() ?: JSONObject().put("state", "idle")
+            "status" -> status(context)
             else -> throw CliError("cmd desconocido: '$cmd' (list|check|channel|update|status)")
         }
+
+    /** `instalador` pasa a `hecho` cuando la versión instalada ya es la del trabajo. */
+    private fun status(context: Context): JSONObject {
+        val job = lastJob ?: return JSONObject().put("state", "idle")
+        val done = job.state == "instalador" &&
+            getInstalledVersion(context, job.packageId) == job.version.removePrefix("v")
+        return (if (done) job.copy(state = "hecho") else job).toJson()
+    }
 
     private suspend fun checkApps(context: Context, pkg: String?): JSONArray {
         val apps = if (pkg == null) managed else listOf(appFor(pkg))
