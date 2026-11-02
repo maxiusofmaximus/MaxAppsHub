@@ -130,6 +130,9 @@ switch ($cmd) {
     }
     'update' {
         if ($pos.Count -lt 2) { Fail 'Uso: mah update <pkg> [--confirm] [--force]' }
+        # Android bloquea abrir el instalador desde segundo plano: el Hub debe estar al frente.
+        & $ADB -s $SERIAL shell monkey -p com.maxapps.hub -c android.intent.category.LAUNCHER 1 *> $null
+        Start-Sleep -Seconds 2
         $data = Show-Result (Invoke-Cli 'update' @{ pkg = $pos[1]; force = $(if ($force) { '1' } else { '0' }) } 30)
         Write-Host "Descarga lanzada: $($data.packageId) $($data.version)"
         if ($confirm) { Confirm-Installer }
