@@ -72,13 +72,13 @@ function Get-WindowXml {
     return ($raw | Out-String)
 }
 
-# Busca el botón Instalar/Actualizar dentro del instalador (paquete *packageinstaller*).
-function Find-InstallButton([string]$xml) {
+# Busca un botón del instalador (paquete *packageinstaller*) cuyo texto encaje con $pattern.
+function Find-InstallerButton([string]$xml, [string]$pattern) {
     try { [xml]$doc = $xml } catch { return $null }
     foreach ($n in $doc.SelectNodes('//node')) {
         if ($n.package -notmatch 'packageinstaller') { continue }
         $label = if ($n.text) { $n.text } else { $n.'content-desc' }
-        if ($label -notmatch '^(instalar|actualizar|install|update)$') { continue }
+        if ($label -notmatch $pattern) { continue }
         if ($n.bounds -match '\[(\d+),(\d+)\]\[(\d+),(\d+)\]') {
             $x = [math]::Floor(([int]$matches[1] + [int]$matches[3]) / 2)
             $y = [math]::Floor(([int]$matches[2] + [int]$matches[4]) / 2)
@@ -88,8 +88,14 @@ function Find-InstallButton([string]$xml) {
     return $null
 }
 
+function Find-InstallButton([string]$xml) { Find-InstallerButton $xml '^(instalar|actualizar|install|update)$' }
+
+# Una pantalla «Se instaló la app» que quedó de una instalación anterior tapa el diálogo nuevo
+# y deja `mah status` en «instalador»: se cierra con «Listo» y se sigue esperando.
+function Find-StaleDoneButton([string]$xml) { Find-InstallerButton $xml '^(listo|hecho|done)$' }
+
 function Confirm-Installer {
-    $deadline = (Get-Date).AddSeconds(60)
+    $deadline = (Get-Date).AddSeconds(90)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 2
         $xml = Get-WindowXml
@@ -100,9 +106,14 @@ function Confirm-Installer {
                 Write-Host "Pulsado «$($btn.Label)» en el instalador del sistema."
                 return
             }
+            $stale = Find-StaleDoneButton $xml
+            if ($stale) {
+                & $ADB -s $SERIAL shell input tap $stale.X $stale.Y | Out-Null
+                Write-Host "Cerrada una pantalla vieja del instalador («$($stale.Label)»); sigo esperando el diálogo nuevo."
+            }
         }
     }
-    Write-Warning 'El instalador no mostró «Instalar»/«Actualizar» en 60 s. Confírmalo a mano en el móvil.'
+    Write-Warning 'El instalador no mostró «Instalar»/«Actualizar» en 90 s. Confírmalo a mano en el móvil.'
 }
 
 # --- Comandos ---
