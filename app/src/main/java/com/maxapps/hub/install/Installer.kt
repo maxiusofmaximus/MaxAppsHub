@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import java.io.File
@@ -72,9 +73,8 @@ fun downloadAndInstall(
                         val status = cursor.getInt(statusIdx)
                         if (status == DownloadManager.STATUS_SUCCESSFUL) {
                             onProgress(1f)
-                            onComplete()
-                            // Trigger install
-                            installApk(context, targetFile)
+                            // onComplete solo si el instalador se abrió de verdad
+                            installApk(context, targetFile, onLaunched = onComplete, onError = onError)
                         } else {
                             onError("La descarga falló")
                         }
@@ -135,7 +135,7 @@ fun downloadAndInstall(
 /**
  * Opens the system installer for the given APK file.
  */
-fun installApk(context: Context, file: File) {
+fun installApk(context: Context, file: File, onLaunched: () -> Unit = {}, onError: (String) -> Unit = {}) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         if (!context.packageManager.canRequestPackageInstalls()) {
             val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
@@ -144,6 +144,7 @@ fun installApk(context: Context, file: File) {
             }
             context.startActivity(intent)
             Toast.makeText(context, "Por favor autoriza la instalación de aplicaciones", Toast.LENGTH_LONG).show()
+            onError("falta el permiso para instalar aplicaciones desconocidas")
             return
         }
     }
@@ -155,10 +156,15 @@ fun installApk(context: Context, file: File) {
         )
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
+            // CLEAR_TASK: una tarea vieja del instalador reutilizada se tragaba el intent nuevo
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
         }
         context.startActivity(intent)
+        Log.i("MaxAppsHubCli", "installApk launched")
+        onLaunched()
     } catch (e: Exception) {
         Toast.makeText(context, "No se pudo abrir el instalador: ${e.message}", Toast.LENGTH_LONG).show()
+        onError("No se pudo abrir el instalador: ${e.message}")
     }
 }

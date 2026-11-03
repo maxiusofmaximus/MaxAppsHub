@@ -55,6 +55,8 @@ Funciona con `adb shell am broadcast` hacia `CliReceiver`, protegido con `androi
 Limitaciones:
 -   `update --force` salta la comparación de versiones (reinstalar o pasar de una build de pruebas `1.0.5` a `1.0.5-alpha.1`); Android sigue rechazando bajar de `versionCode`.
 -   Android exige confirmar cada instalación. `--confirm` pulsa «Instalar»/«Actualizar» en el instalador vía `uiautomator`; sin esa opción, confírmala en el móvil.
+-   El estado `instalador` de `mah status` significa que el Hub ya abrió el instalador del sistema (`startActivity` funcionó); si no pudo, el estado es `error` con el motivo. Estados: `descargando`, `instalador`, `hecho`, `error` (sin cambios en el JSON).
+-   Antes de `update`, `mah` cierra (`am force-stop`) el instalador del sistema si lo identifica como `*packageinstaller*`. Con `--confirm`, si a los 25 s no hay botón, guarda un diagnóstico `mah-stall-<fecha>.txt` en el directorio temporal, reenvía `update --force` una vez y sigue esperando hasta 90 s.
 -   `update` descarga en segundo plano. Si el sistema mata el proceso de la app antes de terminar la descarga, no se abre el instalador: repite el comando.
 -   La pantalla del Hub no se refresca sola con cambios hechos por CLI; ábrela de nuevo o pulsa «Buscar».
 

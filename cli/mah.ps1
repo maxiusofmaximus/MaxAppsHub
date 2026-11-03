@@ -94,8 +94,50 @@ function Find-InstallButton([string]$xml) { Find-InstallerButton $xml '^(instala
 # y deja `mah status` en «instalador»: se cierra con «Listo» y se sigue esperando.
 function Find-StaleDoneButton([string]$xml) { Find-InstallerButton $xml '^(listo|hecho|done)$' }
 
-function Confirm-Installer {
+# Cierra el instalador del sistema (su tarea vieja se traga el intent nuevo). El paquete se averigua
+# resolviendo el ACTION_VIEW de un APK y solo se cierra si casa «packageinstaller» (nunca «android»
+# del selector). Si no se puede saber de forma fiable, no se toca nada. [NV: depende del móvil]
+function Stop-SystemInstaller {
+    $out = & $ADB -s $SERIAL shell cmd package resolve-activity --brief -a android.intent.action.VIEW `
+        -t application/vnd.android.package-archive -d content://com.maxapps.hub.fileprovider/x.apk 2>$null | Out-String
+    if ($out -match '([\w.]*packageinstaller[\w.]*)/') {
+        & $ADB -s $SERIAL shell am force-stop $matches[1] | Out-Null
+    } else {
+        Write-Host 'No pude identificar el instalador del sistema; no lo cierro.'
+    }
+}
+
+# Android bloquea abrir el instalador desde segundo plano: el Hub debe estar al frente.
+function Start-Update([string]$pkg, [bool]$forceUpdate) {
+    Stop-SystemInstaller
+    & $ADB -s $SERIAL shell monkey -p com.maxapps.hub -c android.intent.category.LAUNCHER 1 *> $null
+    Start-Sleep -Seconds 2
+    return Show-Result (Invoke-Cli 'update' @{ pkg = $pkg; force = $(if ($forceUpdate) { '1' } else { '0' }) } 30)
+}
+
+# Guarda un diagnóstico del atasco (solo líneas filtradas, sin secretos) y devuelve su ruta.
+function Save-StallDiagnostic([string]$xml) {
+    $path = Join-Path ([IO.Path]::GetTempPath()) ("mah-stall-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $logPat = 'ActivityTaskManager|Background activity|packageinstaller|InstallStart|MaxAppsHubCli|phonemaster'
+    $actPat = 'topResumedActivity|mResumedActivity|packageinstaller|phonemaster'
+    $pkgs = if ($xml) { [regex]::Matches($xml, 'package="([^"]*)"') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique } else { @() }
+    @(
+        '== logcat (ultimas ~150 lineas filtradas) =='
+        (& $ADB -s $SERIAL logcat -d -v time 2>$null | Select-String -Pattern $logPat | Select-Object -Last 150 | ForEach-Object { $_.Line })
+        '== dumpsys activity activities (filtrado) =='
+        (& $ADB -s $SERIAL shell dumpsys activity activities 2>$null | Select-String -Pattern $actPat | ForEach-Object { $_.Line })
+        '== dumpsys window mCurrentFocus =='
+        (& $ADB -s $SERIAL shell dumpsys window 2>$null | Select-String -Pattern 'mCurrentFocus' | ForEach-Object { $_.Line })
+        '== uiautomator: package= de cada nodo =='
+        $pkgs
+    ) | Set-Content -Path $path -Encoding UTF8
+    return $path
+}
+
+function Confirm-Installer([string]$pkg) {
     $deadline = (Get-Date).AddSeconds(90)
+    $stallAt = (Get-Date).AddSeconds(25)
+    $retried = $false
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 2
         $xml = Get-WindowXml
@@ -111,6 +153,18 @@ function Confirm-Installer {
                 & $ADB -s $SERIAL shell input tap $stale.X $stale.Y | Out-Null
                 Write-Host "Cerrada una pantalla vieja del instalador («$($stale.Label)»); sigo esperando el diálogo nuevo."
             }
+        }
+        if (-not $retried -and (Get-Date) -ge $stallAt) {
+            # Con la descarga en curso no es un atasco: se vuelve a mirar en 10 s.
+            $st = (Show-Result (Invoke-Cli 'status' @{} 15))
+            if ($st.state -eq 'descargando') { $stallAt = (Get-Date).AddSeconds(10); continue }
+            if ($st.state -eq 'hecho') { Write-Host 'La app ya está instalada.'; return }
+            if ($st.state -eq 'error') { Write-Warning "El Hub no pudo abrir el instalador: $($st.error)"; return }
+            $retried = $true
+            $file = Save-StallDiagnostic $xml
+            Write-Host "El instalador no mostró el botón en 25 s. Diagnóstico guardado en $file"
+            Write-Host 'Reenvío «update --force» una vez.'
+            Start-Update $pkg $true | Out-Null
         }
     }
     Write-Warning 'El instalador no mostró «Instalar»/«Actualizar» en 90 s. Confírmalo a mano en el móvil.'
@@ -141,12 +195,9 @@ switch ($cmd) {
     }
     'update' {
         if ($pos.Count -lt 2) { Fail 'Uso: mah update <pkg> [--confirm] [--force]' }
-        # Android bloquea abrir el instalador desde segundo plano: el Hub debe estar al frente.
-        & $ADB -s $SERIAL shell monkey -p com.maxapps.hub -c android.intent.category.LAUNCHER 1 *> $null
-        Start-Sleep -Seconds 2
-        $data = Show-Result (Invoke-Cli 'update' @{ pkg = $pos[1]; force = $(if ($force) { '1' } else { '0' }) } 30)
+        $data = Start-Update $pos[1] $force
         Write-Host "Descarga lanzada: $($data.packageId) $($data.version)"
-        if ($confirm) { Confirm-Installer }
+        if ($confirm) { Confirm-Installer $pos[1] }
         else { Write-Host 'Sigue el progreso con «mah status». El instalador del sistema pide confirmación en el móvil.' }
     }
     'status' {

@@ -20,7 +20,7 @@ class CliError(message: String) : Exception(message)
 data class UpdateJob(
     val packageId: String,
     val version: String,
-    val state: String, // descargando | instalador | hecho | error
+    val state: String, // descargando | instalador (startActivity del instalador ya funcionó) | hecho | error
     val progress: Float,
     val error: String?
 ) {
