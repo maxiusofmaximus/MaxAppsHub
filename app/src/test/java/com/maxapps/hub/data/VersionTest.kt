@@ -43,6 +43,14 @@ class VersionTest {
     }
 
     @Test
+    fun `an alpha tag matches the installed versionName of its core`() {
+        assertTrue(isInstalledVersionOf("v2.0.1-alpha.1", "2.0.1"))
+        assertTrue(isInstalledVersionOf("v2.0.1", "2.0.1"))
+        assertFalse(isInstalledVersionOf("v2.0.1-alpha.1", "2.0.0"))
+        assertFalse(isInstalledVersionOf("nightly", "2.0.1"))
+    }
+
+    @Test
     fun `unparseable versions are never newer`() {
         assertNull(Version.parse("nightly"))
         assertNull(Version.parse("1.0.5-"))

@@ -64,3 +64,10 @@ fun isNewerVersion(candidate: String, current: String): Boolean {
     val cur = Version.parse(current) ?: return false
     return c > cur
 }
+
+/** True si [installed] (versionName) tiene el mismo núcleo que [tag]: el tag `v2.0.1-alpha.1` instala una app cuyo versionName es `2.0.1`. */
+fun isInstalledVersionOf(tag: String, installed: String): Boolean {
+    val t = Version.parse(tag) ?: return false
+    val i = Version.parse(installed) ?: return false
+    return t.copy(pre = emptyList()).compareTo(i.copy(pre = emptyList())) == 0
+}

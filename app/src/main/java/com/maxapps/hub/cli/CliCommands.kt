@@ -4,6 +4,7 @@ import android.content.Context
 import com.maxapps.hub.data.AppRegistry
 import com.maxapps.hub.data.HubPrefs
 import com.maxapps.hub.data.ManagedApp
+import com.maxapps.hub.data.isInstalledVersionOf
 import com.maxapps.hub.data.isNewerVersion
 import com.maxapps.hub.install.downloadAndInstall
 import com.maxapps.hub.install.getInstalledVersion
@@ -65,7 +66,7 @@ object CliCommands {
     private fun status(context: Context): JSONObject {
         val job = lastJob ?: return JSONObject().put("state", "idle")
         val done = job.state == "instalador" &&
-            getInstalledVersion(context, job.packageId) == job.version.removePrefix("v")
+            getInstalledVersion(context, job.packageId)?.let { isInstalledVersionOf(job.version, it) } == true
         return (if (done) job.copy(state = "hecho") else job).toJson()
     }
 
