@@ -63,7 +63,7 @@ Limitaciones:
 ## 🧪 Aplicaciones Gestionadas Actualmente
 -   **Ley de Gases (Flashcards Química)**: [Repo de la App](https://github.com/maxiusofmaximus/APK-Android-Ley-de-Gases)
 -   **Atlas OS**: [Repo de la App](https://github.com/maxiusofmaximus/atlas-os)
--   **Herdr Notify**: [Repo de la App](https://github.com/maxiusofmaximus/herdr-notify)
+-   **Excubia**: [Repo de la App](https://github.com/maxiusofmaximus/excubia)
 
 ---
 Desarrollado con ❤️ para maximizar la productividad en Android.

@@ -45,16 +45,6 @@ object AppRegistry {
             icon = "🔔",
             description = "Monitoreo en tiempo real y acciones remotas para tus agentes.",
             accentColorHex = 0xFF10B981
-        ),
-        // La app anterior (otro paquete) sigue aquí hasta que se desinstale.
-        ManagedApp(
-            name = "Herdr Notify (antigua)",
-            packageId = "dev.herdrnotify.app",
-            githubOwner = "maxiusofmaximus",
-            githubRepo = "herdr-notify",
-            icon = "🔔",
-            description = "Versión anterior de Excubia; se puede desinstalar.",
-            accentColorHex = 0xFF10B981
         )
     )
 }

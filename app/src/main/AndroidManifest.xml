@@ -8,7 +8,6 @@
         <package android:name="com.flashcards.quimica" />
         <package android:name="com.opencode_os.app" />
         <package android:name="dev.excubia.app" />
-        <package android:name="dev.herdrnotify.app" />
     </queries>
 
     <application
