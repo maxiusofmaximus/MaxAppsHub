@@ -21,6 +21,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.maxapps.hub.data.AppRegistry
 import com.maxapps.hub.data.HubPrefs
 import com.maxapps.hub.data.ManagedApp
@@ -117,24 +118,12 @@ fun LauncherApp() {
         }
     }
 
-    // Fetch latest releases on launch
-    LaunchedEffect(Unit) {
+    // Every return to the screen reads again what is installed and what is published:
+    // after an install the Hub comes back from the background with stale cards otherwise.
+    LifecycleResumeEffect(Unit) {
         checkHubUpdate()
-        appStates = appStates.map { state ->
-            state.copy(isLoading = true)
-        }
-        appStates = appStates.map { state ->
-            val release = GitHubApi.fetchRelease(
-                state.app.githubOwner,
-                state.app.githubRepo,
-                state.includePrereleases
-            )
-            state.copy(
-                latestRelease = release,
-                isLoading = false,
-                error = if (release == null) "No se pudo obtener información" else null
-            )
-        }
+        appStates.indices.forEach { refreshApp(it) }
+        onPauseOrDispose {}
     }
 
     Scaffold(
