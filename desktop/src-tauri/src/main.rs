@@ -422,6 +422,37 @@ impl Hub {
         cx.notify();
     }
 
+    /// Asks for the folder new apps go to. The dialog runs off the UI thread; apps already installed stay where they are.
+    fn choose_install_folder(&mut self, cx: &mut Context<Self>) {
+        let start = shell::install_root_saved().or_else(install::apps_root).unwrap_or_default();
+        cx.spawn(async move |this, cx| {
+            let chosen = cx.background_executor().spawn(async move { shell::pick_folder(&start) }).await;
+            this.update(cx, |hub, cx| {
+                match chosen {
+                    Ok(Some(path)) => {
+                        hub.message = match shell::save_install_root(Some(&path)) {
+                            Ok(()) => tr("Las apps nuevas se instalarán en la carpeta elegida.", "New apps will install in the chosen folder.").to_string(),
+                            Err(error) => error,
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => hub.message = error,
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn reset_install_folder(&mut self, cx: &mut Context<Self>) {
+        self.message = match shell::save_install_root(None) {
+            Ok(()) => tr("Las apps nuevas volverán a la carpeta por defecto.", "New apps will go back to the default folder.").to_string(),
+            Err(error) => error,
+        };
+        cx.notify();
+    }
+
     /// Puts the Hub in its own folder with a shortcut and an uninstaller. Copies a large file, so it runs off the UI thread.
     fn install_hub_clicked(&mut self, cx: &mut Context<Self>) {
         if self.busy || system::hub_installed() {
@@ -1199,7 +1230,7 @@ fn sort_button(id: &'static str, label: &'static str, active: bool) -> Stateful<
 }
 
 /// A setting as a card: its name and what it does, and its current value as a chip.
-fn setting_row(name: &'static str, detail: &'static str, value: &'static str, on: bool) -> Div {
+fn setting_row(name: &'static str, detail: impl IntoElement, value: &'static str, on: bool) -> Div {
     div()
         .flex()
         .justify_between()
@@ -1358,6 +1389,40 @@ impl Hub {
                 .hover(|style| style.bg(rgb(0x18263f)))
                 .on_click(cx.listener(|this, _, _, cx| this.install_hub_clicked(cx))),
             )
+            .child(
+                setting_row(
+                    tr("Carpeta de instalación", "Install folder"),
+                    match shell::install_root_saved() {
+                        Some(path) => format!("{} {}", tr("Ahora:", "Now:"), path.display()),
+                        None => tr(
+                            "Por defecto, dentro de tu usuario. Las apps ya instaladas se quedan donde están.",
+                            "Default, inside your user folder. Apps already installed stay where they are.",
+                        )
+                        .to_string(),
+                    },
+                    tr("Cambiar", "Change"),
+                    false,
+                )
+                .id("set-install-folder")
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(0x18263f)))
+                .on_click(cx.listener(|this, _, _, cx| this.choose_install_folder(cx))),
+            )
+            .children(shell::install_root_saved().is_some().then(|| {
+                setting_row(
+                    tr("Volver a la carpeta por defecto", "Back to the default folder"),
+                    tr(
+                        "Las apps nuevas se instalarán otra vez en la carpeta por defecto.",
+                        "New apps will install in the default folder again.",
+                    ),
+                    tr("Restablecer", "Reset"),
+                    false,
+                )
+                .id("set-install-folder-reset")
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(0x18263f)))
+                .on_click(cx.listener(|this, _, _, cx| this.reset_install_folder(cx)))
+            }))
             .child(
                 setting_row(
                     tr("Registro de actividad", "Activity log"),

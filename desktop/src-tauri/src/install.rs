@@ -92,9 +92,52 @@ pub fn download_with(url: &str, progress: &Progress) -> Result<Vec<u8>, String> 
     Ok(bytes)
 }
 
-pub fn portable_dir(folder: &str) -> Option<PathBuf> {
+/// The folder that holds the apps by default, under the user's local data.
+pub fn apps_root() -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA")?;
-    Some(PathBuf::from(base).join("MaxAppsHub").join("apps").join(folder))
+    Some(PathBuf::from(base).join("MaxAppsHub").join("apps"))
+}
+
+pub fn portable_dir(folder: &str) -> Option<PathBuf> {
+    Some(pick_dir(&apps_root()?, crate::shell::install_root_saved().as_deref(), folder))
+}
+
+/// Where an app's folder is. A new install goes to the chosen root; an app already in the default root stays there.
+fn pick_dir(default_root: &std::path::Path, chosen_root: Option<&std::path::Path>, folder: &str) -> PathBuf {
+    let default = default_root.join(folder);
+    let Some(chosen) = chosen_root.map(|root| root.join(folder)) else {
+        return default;
+    };
+    if chosen.exists() || !default.exists() {
+        chosen
+    } else {
+        default
+    }
+}
+
+/// Runs an installer or uninstaller silently. With a chosen folder, `/D=` goes last and unquoted, as NSIS reads it.
+fn run_silently(program: &std::path::Path, folder: Option<&std::path::Path>) -> std::io::Result<std::process::ExitStatus> {
+    let mut command = Command::new(program);
+    command.arg("/S");
+    if let Some(folder) = folder {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.raw_arg(format!("/D={}", folder.display()));
+        }
+        #[cfg(not(windows))]
+        command.arg(format!("/D={}", folder.display()));
+    }
+    command.status()
+}
+
+/// The folder a new installer install is told to use. Only when the user chose one and the app is not installed yet:
+/// an update or a rollback stays where the app already is, so it does not leave a second copy behind.
+fn installer_folder(app: &DesktopApp) -> Option<PathBuf> {
+    if crate::shell::install_root_saved().is_none() || installed_here(app).is_some() {
+        return None;
+    }
+    app_dir(app)
 }
 
 /// Downloads the release, refuses it unless its digest matches, and installs it.
@@ -108,9 +151,7 @@ pub fn install(app: &DesktopApp, installer: &Installer, progress: &Progress) -> 
         Delivery::Installer { .. } => {
             let file = std::env::temp_dir().join(&installer.file_name);
             std::fs::write(&file, &bytes).map_err(|e| e.to_string())?;
-            let status = Command::new(&file)
-                .arg("/S")
-                .status()
+            let status = run_silently(&file, installer_folder(app).as_deref())
                 .map_err(|_| tr("No pude arrancar el instalador.", "I couldn't start the installer.").to_string())?;
             let _ = std::fs::remove_file(&file);
             if status.success() {
@@ -256,9 +297,7 @@ pub fn rollback(app: &DesktopApp) -> Result<(), String> {
         .into());
     }
     if matches!(app.delivery, Delivery::Installer { .. }) {
-        let status = Command::new(&program)
-            .arg("/S")
-            .status()
+        let status = run_silently(&program, installer_folder(app).as_deref())
             .map_err(|_| tr("No pude arrancar el instalador.", "I couldn't start the installer.").to_string())?;
         if !status.success() {
             return Err(format!(
@@ -429,6 +468,24 @@ pub fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_install_goes_to_the_chosen_folder_and_an_app_already_in_the_default_one_stays() {
+        let base = std::env::temp_dir().join(format!("maxapps-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (default, chosen) = (base.join("default"), base.join("chosen"));
+        // No choice: the default folder, as before.
+        assert_eq!(pick_dir(&default, None, "app"), default.join("app"));
+        // A chosen folder and nothing installed yet: the new install goes there.
+        assert_eq!(pick_dir(&default, Some(&chosen), "app"), chosen.join("app"));
+        // An app already in the default folder keeps being found there.
+        std::fs::create_dir_all(default.join("app")).unwrap();
+        assert_eq!(pick_dir(&default, Some(&chosen), "app"), default.join("app"));
+        // Once it exists in the chosen folder, that one wins.
+        std::fs::create_dir_all(chosen.join("app")).unwrap();
+        assert_eq!(pick_dir(&default, Some(&chosen), "app"), chosen.join("app"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn a_folder_is_counted_by_its_files_and_sizes_are_readable() {

@@ -184,6 +184,40 @@ pub fn save_alpha_app(app: &str, on: bool) -> Result<(), String> {
     save_value("alpha_apps", serde_json::json!(apps))
 }
 
+/// The folder the user chose for new installs. None keeps the default folder.
+pub fn install_root_saved() -> Option<PathBuf> {
+    settings()["install_root"].as_str().filter(|path| !path.is_empty()).map(PathBuf::from)
+}
+
+pub fn save_install_root(root: Option<&std::path::Path>) -> Result<(), String> {
+    save_value("install_root", serde_json::json!(root.map(|path| path.display().to_string()).unwrap_or_default()))
+}
+
+/// Asks for a folder with the standard Windows folder dialog. None when the user cancels.
+#[cfg(windows)]
+pub fn pick_folder(start: &std::path::Path) -> Result<Option<PathBuf>, String> {
+    use std::os::windows::process::CommandExt;
+    let script = "Add-Type -AssemblyName System.Windows.Forms; \
+        $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true }; \
+        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; \
+        $dialog.SelectedPath = $env:HUB_START; $dialog.Description = $env:HUB_TEXT; $dialog.ShowNewFolderButton = $true; \
+        if ($dialog.ShowDialog($owner) -eq 'OK') { Write-Output $dialog.SelectedPath }";
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-STA", "-Command", script])
+        .env("HUB_START", start)
+        .env("HUB_TEXT", tr("Elige dónde instalar las apps nuevas", "Choose where to install new apps"))
+        .creation_flags(0x0800_0000)
+        .output()
+        .map_err(|_| tr("No pude abrir el selector de carpetas", "I couldn't open the folder picker").to_string())?;
+    let chosen = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!chosen.is_empty()).then(|| PathBuf::from(chosen)))
+}
+
+#[cfg(not(windows))]
+pub fn pick_folder(_: &std::path::Path) -> Result<Option<PathBuf>, String> {
+    Err(tr("Solo funciona en Windows.", "It only works on Windows.").to_string())
+}
+
 /// The Hub's data folder: its settings and its log.
 pub fn data_dir() -> Option<PathBuf> {
     settings_file().and_then(|file| file.parent().map(PathBuf::from))
