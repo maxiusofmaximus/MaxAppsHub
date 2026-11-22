@@ -21,6 +21,8 @@ Thumbs.db
 # Parent project (this launcher lives temporarily inside the parent repo)
 android/
 docs/
-.github/
 .vscode/
 Ley_de_gases.html
+
+# Desktop build output
+desktop/src-tauri/target/

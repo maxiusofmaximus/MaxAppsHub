@@ -1,0 +1,310 @@
+//! What happens around the window: the saved close choice, hiding and showing
+//! the window, and the tray icon. GPUI 0.2 cannot hide a window on Windows, so
+//! the Win32 calls are made here on the window's own handle.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::time::Duration;
+
+use gpui::Window;
+use crate::i18n::tr;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use winreg::enums::HKEY_CURRENT_USER;
+use winreg::RegKey;
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND};
+use windows_sys::Win32::System::Threading::{CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject, INFINITE};
+use windows_sys::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE};
+
+/// The main window's handle, stored once the window exists (0 before that).
+static MAIN_WINDOW: AtomicIsize = AtomicIsize::new(0);
+
+/// Set by the listener thread when a second start asks for the window.
+static SHOW_REQUEST: AtomicBool = AtomicBool::new(false);
+
+pub enum Launch {
+    First,
+    /// Another Hub already runs; it was asked to show itself.
+    Second,
+}
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// One Hub per user session. A second start wakes the first one and exits.
+pub fn claim_instance() -> Launch {
+    let mutex_name = wide("Local\\MaxAppsHub.Single");
+    let event_name = wide("Local\\MaxAppsHub.Show");
+    // After a self-update the previous copy may still be closing: wait for it.
+    let mut retries = if std::env::args().any(|arg| arg == "--updated") { 100 } else { 0 };
+    unsafe {
+        let (mutex, already) = loop {
+            let mutex = CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
+            let already = GetLastError() == ERROR_ALREADY_EXISTS;
+            if !already || retries == 0 {
+                break (mutex, already);
+            }
+            CloseHandle(mutex);
+            retries -= 1;
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let event = CreateEventW(std::ptr::null(), 0, 0, event_name.as_ptr());
+        if already {
+            SetEvent(event);
+            CloseHandle(event);
+            return Launch::Second;
+        }
+        // Handles are plain numbers; the listener owns this one for the process lifetime.
+        let event = event as isize;
+        std::thread::spawn(move || loop {
+            WaitForSingleObject(event as HANDLE, INFINITE);
+            SHOW_REQUEST.store(true, Ordering::SeqCst);
+        });
+        // The mutex handle is kept open on purpose: it marks this instance as the running one.
+        let _ = mutex;
+        Launch::First
+    }
+}
+
+pub fn take_show_request() -> bool {
+    SHOW_REQUEST.swap(false, Ordering::SeqCst)
+}
+
+/// Identifies the Hub to Windows notifications; registered once so toasts show its name.
+pub const APP_ID: &str = "MaxAppsHub";
+
+pub fn register_app_id() {
+    if let Ok((key, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(format!("Software\\Classes\\AppUserModelId\\{APP_ID}")) {
+        let _ = key.set_value("DisplayName", &"MaxApps Hub".to_string());
+    }
+}
+
+const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const RUN_NAME: &str = "MaxAppsHub";
+
+/// Whether the Hub starts with Windows.
+pub fn autostart_on() -> bool {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(RUN_KEY)
+        .and_then(|run| run.get_value::<String, _>(RUN_NAME))
+        .is_ok()
+}
+
+/// Adds or removes the Hub from the Windows startup list. At logon it starts hidden in the tray.
+pub fn set_autostart(on: bool) -> Result<(), String> {
+    let (run, _) = RegKey::predef(HKEY_CURRENT_USER)
+        .create_subkey(RUN_KEY)
+        .map_err(|_| "No pude abrir el inicio de Windows".to_string())?;
+    if on {
+        let exe = std::env::current_exe().map_err(|_| "No encuentro el programa del Hub".to_string())?;
+        run.set_value(RUN_NAME, &format!("\"{}\" --background", exe.display()))
+            .map_err(|_| tr("No pude activar el inicio con Windows", "I couldn't turn on start with Windows").to_string())
+    } else {
+        match run.delete_value(RUN_NAME) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(tr("No pude desactivar el inicio con Windows", "I couldn't turn off start with Windows").into()),
+        }
+    }
+}
+
+fn settings_file() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("MaxAppsHub").join("settings.json"))
+}
+
+fn settings() -> serde_json::Value {
+    settings_file()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// Writes one key and keeps the others, so every setting survives every save.
+fn save_value(key: &str, value: serde_json::Value) -> Result<(), String> {
+    let no_folder = || tr("No encuentro la carpeta de datos", "I can't find the data folder").to_string();
+    let path = settings_file().ok_or_else(no_folder)?;
+    let dir = path.parent().ok_or_else(no_folder)?;
+    std::fs::create_dir_all(dir)
+        .map_err(|_| tr("No pude crear la carpeta de datos", "I couldn't create the data folder").to_string())?;
+    let mut all = settings();
+    all[key] = value;
+    std::fs::write(&path, all.to_string())
+        .map_err(|_| tr("No pude guardar el ajuste", "I couldn't save the setting").to_string())
+}
+
+fn save_setting(key: &str, on: bool) -> Result<(), String> {
+    save_value(key, serde_json::json!(on))
+}
+
+/// Spanish unless the user chose English in Settings.
+pub fn english_on() -> bool {
+    settings()["language"].as_str() == Some("en")
+}
+
+pub fn save_english(on: bool) -> Result<(), String> {
+    save_value("language", serde_json::json!(if on { "en" } else { "es" }))
+}
+
+/// Closing the window keeps the Hub in the tray unless the user chose otherwise.
+pub fn close_to_tray_saved() -> bool {
+    settings()["close_to_tray"].as_bool().unwrap_or(true)
+}
+
+pub fn save_close_to_tray(on: bool) -> Result<(), String> {
+    save_setting("close_to_tray", on)
+}
+
+/// Off by default: alpha builds are offered only to whoever turns this on.
+pub fn alpha_channel_on() -> bool {
+    settings()["alpha_channel"].as_bool().unwrap_or(false)
+}
+
+pub fn save_alpha_channel(on: bool) -> Result<(), String> {
+    save_setting("alpha_channel", on)
+}
+
+/// Alpha builds for one app only, switched on its card.
+pub fn alpha_app_on(app: &str) -> bool {
+    settings()["alpha_apps"].as_array().is_some_and(|apps| apps.iter().any(|name| name.as_str() == Some(app)))
+}
+
+pub fn save_alpha_app(app: &str, on: bool) -> Result<(), String> {
+    let mut apps: Vec<String> = settings()["alpha_apps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|name| name.as_str().map(String::from))
+        .collect();
+    apps.retain(|name| name != app);
+    if on {
+        apps.push(app.to_string());
+    }
+    save_value("alpha_apps", serde_json::json!(apps))
+}
+
+/// The Hub's data folder: its settings and its log.
+pub fn data_dir() -> Option<PathBuf> {
+    settings_file().and_then(|file| file.parent().map(PathBuf::from))
+}
+
+/// Opens a file or folder in Explorer.
+pub fn open_in_explorer(path: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| tr("No pude abrir el Explorador", "I couldn't open Explorer").to_string())
+}
+
+/// On by default. A release installs itself only after the waiting time in `updates`.
+pub fn auto_update_on() -> bool {
+    settings()["auto_update"].as_bool().unwrap_or(true)
+}
+
+pub fn save_auto_update(on: bool) -> Result<(), String> {
+    save_setting("auto_update", on)
+}
+
+/// Remembers the window's handle so the tray can bring it back later.
+pub fn remember_window(window: &Window) {
+    // GPUI has its own window_handle(); the raw Win32 handle comes from the trait.
+    if let Ok(handle) = HasWindowHandle::window_handle(window) {
+        if let RawWindowHandle::Win32(win) = handle.as_raw() {
+            MAIN_WINDOW.store(win.hwnd.get(), Ordering::SeqCst);
+        }
+    }
+}
+
+fn main_window() -> HWND {
+    MAIN_WINDOW.load(Ordering::SeqCst) as HWND
+}
+
+/// Hides the window: it leaves the screen and the taskbar, the app keeps running.
+pub fn hide_window() {
+    unsafe { ShowWindow(main_window(), SW_HIDE) };
+}
+
+/// Brings the window back, restoring it if it was minimized.
+pub fn show_window() {
+    unsafe {
+        ShowWindow(main_window(), SW_RESTORE);
+        SetForegroundWindow(main_window());
+    }
+}
+
+pub struct Tray {
+    _icon: TrayIcon,
+    open: MenuId,
+    update_all: MenuId,
+    data: MenuId,
+    quit: MenuId,
+}
+
+pub enum TrayAction {
+    Show,
+    UpdateAll,
+    OpenData,
+    Quit,
+}
+
+/// The Hub's own icon, the same file the program embeds, sized for the tray.
+fn tile_icon() -> Result<Icon, String> {
+    const ICON: &[u8] = include_bytes!("../icons/icon.ico");
+    let rgba = image::load_from_memory_with_format(ICON, image::ImageFormat::Ico)
+        .map_err(|error| error.to_string())?
+        .resize_exact(32, 32, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Icon::from_rgba(rgba.into_raw(), width, height).map_err(|error| error.to_string())
+}
+
+/// The tray icon. A left click shows the window; the menu has Open, Update all, the
+/// data folder and Quit.
+pub fn create_tray() -> Result<Tray, String> {
+    let open = MenuItem::with_id("open", tr("Abrir MaxApps Hub", "Open MaxApps Hub"), true, None);
+    let update_all = MenuItem::with_id("update-all", tr("Actualizar todo", "Update all"), true, None);
+    let data = MenuItem::with_id("data", tr("Abrir carpeta de datos", "Open data folder"), true, None);
+    let quit = MenuItem::with_id("quit", tr("Salir de MaxApps Hub", "Quit MaxApps Hub"), true, None);
+    let menu = Menu::new();
+    for item in [&open, &update_all, &data, &quit] {
+        menu.append(item).map_err(|error| error.to_string())?;
+    }
+    let icon = TrayIconBuilder::new()
+        .with_tooltip("MaxApps Hub")
+        .with_icon(tile_icon()?)
+        .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
+        .build()
+        .map_err(|error| error.to_string())?;
+    Ok(Tray {
+        _icon: icon,
+        open: open.id().clone(),
+        update_all: update_all.id().clone(),
+        data: data.id().clone(),
+        quit: quit.id().clone(),
+    })
+}
+
+/// What the user asked the tray for since the last call.
+pub fn pending(tray: &Tray) -> Vec<TrayAction> {
+    let mut actions = Vec::new();
+    while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+            actions.push(TrayAction::Show);
+        }
+    }
+    while let Ok(event) = MenuEvent::receiver().try_recv() {
+        if event.id == tray.open {
+            actions.push(TrayAction::Show);
+        } else if event.id == tray.update_all {
+            actions.push(TrayAction::UpdateAll);
+        } else if event.id == tray.data {
+            actions.push(TrayAction::OpenData);
+        } else if event.id == tray.quit {
+            actions.push(TrayAction::Quit);
+        }
+    }
+    actions
+}

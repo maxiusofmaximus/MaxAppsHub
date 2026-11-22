@@ -1,0 +1,100 @@
+name: Desktop release
+
+# Builds the MaxApps Hub on a tag such as desktop-v1.0.1-alpha.2, optionally signs it
+# with SignPath, signs it with the update key, and publishes the GitHub release with
+# the program and its .sig file. The Hub refuses any update whose .sig does not verify.
+
+on:
+  push:
+    tags: ["desktop-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Work out the version from the tag
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#desktop-v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the Hub
+        shell: bash
+        working-directory: desktop/src-tauri
+        run: cargo build --release --locked
+
+      - name: Name the program the way the Hub expects
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp desktop/src-tauri/target/release/maxapps-hub-desktop.exe \
+            "staging/MaxAppsHub-${{ steps.version.outputs.version }}-desktop.exe"
+
+      - name: Upload the program for signing
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-program
+          path: staging/*.exe
+
+      # Authenticode signing through the SignPath Foundation. Runs only once the
+      # SIGNPATH_API_TOKEN secret exists; every signing request is approved by hand.
+      - name: Sign with SignPath
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: maxappshub
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      # Until SignPath is set up the program stays unsigned by Authenticode; the
+      # update key below still protects every update the Hub installs.
+      - name: Keep the built program when SignPath is not set up
+        if: ${{ secrets.SIGNPATH_API_TOKEN == '' }}
+        shell: bash
+        run: |
+          mkdir -p signed
+          cp staging/*.exe signed/
+
+      - name: Sign the program with the update key
+        shell: bash
+        env:
+          UPDATE_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          exe="$(ls signed/*.exe)"
+          key="$RUNNER_TEMP/update-key.pem"
+          printf '%s\n' "$UPDATE_KEY" > "$key"
+          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/update-public.pem"
+          openssl pkeyutl -sign -inkey "$key" -rawin -in "$exe" -out "$RUNNER_TEMP/signature.bin"
+          openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/update-public.pem" -rawin \
+            -in "$exe" -sigfile "$RUNNER_TEMP/signature.bin"
+          rm -f "$key"
+          od -An -tx1 -v "$RUNNER_TEMP/signature.bin" | tr -d ' \n' > "$exe.sig"
+
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          flags=()
+          case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
+          if [ -f "desktop/notes/$VERSION.md" ]; then
+            notes=(--notes-file "desktop/notes/$VERSION.md")
+          else
+            notes=(--generate-notes)
+          fi
+          gh release create "$GITHUB_REF_NAME" signed/*.exe signed/*.sig \
+            --title "MaxApps Hub $VERSION" "${notes[@]}" "${flags[@]}"

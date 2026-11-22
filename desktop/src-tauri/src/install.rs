@@ -1,0 +1,299 @@
+//! Installs, finds and opens the apps in the registry. Every download is checked
+//! against the GitHub digest before anything runs.
+
+use std::io::Read;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use sha2::{Digest, Sha256};
+
+use crate::github::Installer;
+use crate::i18n::tr;
+use crate::registry::{Delivery, DesktopApp};
+
+/// An app found on this PC.
+#[derive(Clone)]
+pub struct Installed {
+    pub version: String,
+    /// The program to open, when it can be found.
+    pub exe: Option<PathBuf>,
+    /// The uninstall command the installer registered (installers only).
+    pub uninstall: Option<String>,
+    /// A portable app whose program file is missing or no longer matches what was installed.
+    pub damaged: bool,
+}
+
+/// Holds the digest of the portable program as it was installed.
+const DIGEST_FILE: &str = "installed.sha256";
+
+/// False only when the program file no longer matches the digest recorded at install time.
+/// Without a recorded digest (installed before this check) it cannot be judged, so it passes.
+fn intact(dir: &std::path::Path, exe: &std::path::Path) -> bool {
+    let Ok(recorded) = std::fs::read_to_string(dir.join(DIGEST_FILE)) else {
+        return true;
+    };
+    let Ok(bytes) = std::fs::read(exe) else {
+        return false;
+    };
+    digest_matches(recorded.trim(), &bytes)
+}
+
+/// True when the bytes hash to the digest GitHub recorded (`sha256:<hex>`).
+pub fn digest_matches(digest: &str, bytes: &[u8]) -> bool {
+    let Some(expected) = digest.strip_prefix("sha256:") else {
+        return false;
+    };
+    let actual = hex::encode(Sha256::digest(bytes));
+    actual.eq_ignore_ascii_case(expected)
+}
+
+/// Live state of one download, shared with the window: bytes so far, the total
+/// (0 when the server did not say) and a request to stop.
+#[derive(Default)]
+pub struct Progress {
+    pub done: AtomicU64,
+    pub total: AtomicU64,
+    pub cancel: AtomicBool,
+}
+
+pub fn download(url: &str) -> Result<Vec<u8>, String> {
+    download_with(url, &Progress::default())
+}
+
+pub fn download_with(url: &str, progress: &Progress) -> Result<Vec<u8>, String> {
+    let response = ureq::get(url)
+        .set("User-Agent", "maxapps-hub-desktop")
+        .call()
+        .map_err(|_| tr("No pude descargar la versión.", "I couldn't download the version.").to_string())?;
+    let total = response.header("Content-Length").and_then(|value| value.parse().ok()).unwrap_or(0);
+    progress.total.store(total, Ordering::SeqCst);
+    let mut reader = response.into_reader();
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        if progress.cancel.load(Ordering::SeqCst) {
+            return Err(tr("Descarga cancelada.", "Download cancelled.").into());
+        }
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|_| tr("La descarga se cortó.", "The download was interrupted.").to_string())?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        progress.done.store(bytes.len() as u64, Ordering::SeqCst);
+    }
+    Ok(bytes)
+}
+
+fn portable_dir(folder: &str) -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(PathBuf::from(base).join("MaxAppsHub").join("apps").join(folder))
+}
+
+/// Downloads the release, refuses it unless its digest matches, and installs it.
+/// Blocking: call it off the UI thread.
+pub fn install(app: &DesktopApp, installer: &Installer, progress: &Progress) -> Result<(), String> {
+    let bytes = download_with(&installer.download_url, progress)?;
+    if !digest_matches(&installer.digest, &bytes) {
+        return Err(tr("La huella de la descarga no coincide; no la instalé.", "The download's fingerprint doesn't match; I didn't install it.").into());
+    }
+    match &app.delivery {
+        Delivery::Installer { .. } => {
+            let file = std::env::temp_dir().join(&installer.file_name);
+            std::fs::write(&file, &bytes).map_err(|e| e.to_string())?;
+            let status = Command::new(&file)
+                .arg("/S")
+                .status()
+                .map_err(|_| tr("No pude arrancar el instalador.", "I couldn't start the installer.").to_string())?;
+            let _ = std::fs::remove_file(&file);
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{} {}.",
+                    tr("El instalador terminó con código", "The installer ended with code"),
+                    status.code().unwrap_or(-1)
+                ))
+            }
+        }
+        Delivery::Portable { folder } => {
+            let dir = portable_dir(folder).ok_or_else(|| tr("No encuentro LOCALAPPDATA", "I can't find LOCALAPPDATA").to_string())?;
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+                if entry.path().extension().is_some_and(|ext| ext == "exe") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+            std::fs::write(dir.join(&installer.file_name), &bytes).map_err(|e| e.to_string())?;
+            std::fs::write(dir.join(DIGEST_FILE), &installer.digest).map_err(|e| e.to_string())?;
+            std::fs::write(dir.join("version.txt"), &installer.version).map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// The app as it is on this PC, if it is installed.
+pub fn installed(app: &DesktopApp) -> Option<Installed> {
+    match &app.delivery {
+        Delivery::Installer { display_name } => uninstall_entry(display_name),
+        Delivery::Portable { folder } => {
+            let dir = portable_dir(folder)?;
+            let version = std::fs::read_to_string(dir.join("version.txt")).ok()?.trim().to_string();
+            let exe = std::fs::read_dir(&dir)
+                .ok()?
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|path| path.extension().is_some_and(|ext| ext == "exe"));
+            let damaged = match &exe {
+                None => true,
+                Some(path) => !intact(&dir, path),
+            };
+            Some(Installed { version, exe, uninstall: None, damaged })
+        }
+    }
+}
+
+/// Removes the app: its own silent uninstaller for installers, the folder for portable apps.
+pub fn uninstall(app: &DesktopApp, installed: &Installed) -> Result<(), String> {
+    match &app.delivery {
+        Delivery::Installer { .. } => {
+            let command = installed
+                .uninstall
+                .as_deref()
+                .ok_or_else(|| tr("No encuentro el desinstalador", "I can't find the uninstaller").to_string())?;
+            let (program, args) = split_command(command);
+            // NSIS uninstallers take /S for silent and _?= (their folder) to run in place.
+            let dir = program.parent().map(PathBuf::from).unwrap_or_default();
+            let status = Command::new(&program)
+                .args(&args)
+                .arg("/S")
+                .arg(format!("_?={}", dir.display()))
+                .status()
+                .map_err(|_| tr("No pude arrancar el desinstalador.", "I couldn't start the uninstaller.").to_string())?;
+            if status.success() {
+                remove_leftover_uninstaller(&dir);
+                Ok(())
+            } else {
+                Err(format!(
+                    "{} {}.",
+                    tr("El desinstalador terminó con código", "The uninstaller ended with code"),
+                    status.code().unwrap_or(-1)
+                ))
+            }
+        }
+        Delivery::Portable { folder } => {
+            let dir = portable_dir(folder).ok_or_else(|| tr("No encuentro LOCALAPPDATA", "I can't find LOCALAPPDATA").to_string())?;
+            std::fs::remove_dir_all(&dir)
+                .map_err(|_| tr("No pude borrar la carpeta de la app.", "I couldn't delete the app's folder.").to_string())
+        }
+    }
+}
+
+/// NSIS uninstallers run in place cannot delete themselves, so the folder keeps only `uninstall.exe`.
+/// Removes that leftover and the folder, and nothing when other files are present.
+/// shortcut: only handles NSIS's own leftover, not any other file a publisher leaves behind.
+fn remove_leftover_uninstaller(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let entries: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    let only_uninstaller = entries.iter().all(|path| {
+        path.file_name().is_some_and(|name| name.eq_ignore_ascii_case("uninstall.exe")) && path.is_file()
+    });
+    if only_uninstaller {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Splits a command such as `"C:\App\uninstall.exe" /x` into the program and its arguments.
+fn split_command(command: &str) -> (PathBuf, Vec<String>) {
+    let command = command.trim();
+    let (program, rest) = match command.strip_prefix('"').and_then(|quoted| quoted.split_once('"')) {
+        Some((program, rest)) => (program, rest),
+        None => command.split_once(' ').unwrap_or((command, "")),
+    };
+    (PathBuf::from(program), rest.split_whitespace().map(String::from).collect())
+}
+
+#[cfg(windows)]
+fn uninstall_entry(display_name: &str) -> Option<Installed> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    let uninstall = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall")
+        .ok()?;
+    uninstall.enum_keys().flatten().find_map(|key_name| {
+        let entry = uninstall.open_subkey(&key_name).ok()?;
+        let name: String = entry.get_value("DisplayName").ok()?;
+        if name != display_name {
+            return None;
+        }
+        let version: String = entry.get_value("DisplayVersion").ok()?;
+        let icon: String = entry.get_value("DisplayIcon").unwrap_or_default();
+        let exe = PathBuf::from(icon.trim_matches('"').split(',').next().unwrap_or_default());
+        let uninstall = entry.get_value::<String, _>("UninstallString").ok();
+        Some(Installed { version, exe: exe.exists().then_some(exe), uninstall, damaged: false })
+    })
+}
+
+#[cfg(not(windows))]
+fn uninstall_entry(_display_name: &str) -> Option<Installed> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_uninstall_command_is_split_into_program_and_arguments() {
+        let (program, args) = split_command(r#""C:\Apps\Excubia\uninstall.exe" /keep"#);
+        assert_eq!(program, PathBuf::from(r"C:\Apps\Excubia\uninstall.exe"));
+        assert_eq!(args, vec!["/keep"]);
+        let (program, args) = split_command(r"C:\Apps\uninstall.exe");
+        assert_eq!(program, PathBuf::from(r"C:\Apps\uninstall.exe"));
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn a_program_that_no_longer_matches_its_recorded_digest_is_not_intact() {
+        let dir = std::env::temp_dir().join(format!("maxapps-intact-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("app.exe");
+        std::fs::write(&exe, b"programa").unwrap();
+        // Without a recorded digest the program cannot be judged, so it passes.
+        assert!(intact(&dir, &exe));
+        std::fs::write(dir.join(DIGEST_FILE), format!("sha256:{}", hex::encode(Sha256::digest(b"programa")))).unwrap();
+        assert!(intact(&dir, &exe));
+        std::fs::write(&exe, b"programa roto").unwrap();
+        assert!(!intact(&dir, &exe));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_leftover_uninstaller_is_removed_but_other_files_are_kept() {
+        let base = std::env::temp_dir().join(format!("maxapps-leftover-{}", std::process::id()));
+        let alone = base.join("alone");
+        std::fs::create_dir_all(&alone).unwrap();
+        std::fs::write(alone.join("uninstall.exe"), b"u").unwrap();
+        remove_leftover_uninstaller(&alone);
+        assert!(!alone.exists());
+
+        let kept = base.join("kept");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(kept.join("uninstall.exe"), b"u").unwrap();
+        std::fs::write(kept.join("datos.db"), b"d").unwrap();
+        remove_leftover_uninstaller(&kept);
+        assert!(kept.join("datos.db").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_digest_matches_only_the_exact_bytes() {
+        let bytes = b"instalador";
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+        assert!(digest_matches(&digest, bytes));
+        assert!(!digest_matches(&digest, b"otro"));
+        assert!(!digest_matches("md5:abc", bytes));
+    }
+}
