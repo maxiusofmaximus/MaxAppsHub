@@ -22,10 +22,15 @@ pub struct Installed {
     pub uninstall: Option<String>,
     /// A portable app whose program file is missing or no longer matches what was installed.
     pub damaged: bool,
+    /// The version a rollback brings back, when one is kept.
+    pub previous: Option<String>,
 }
 
-/// Holds the digest of the portable program as it was installed.
+/// Holds the digest of the program as it was installed.
 const DIGEST_FILE: &str = "installed.sha256";
+const VERSION_FILE: &str = "version.txt";
+/// The folder inside an app's folder that keeps the one previous version.
+const PREVIOUS: &str = "previous";
 
 /// False only when the program file no longer matches the digest recorded at install time.
 /// Without a recorded digest (installed before this check) it cannot be judged, so it passes.
@@ -109,6 +114,10 @@ pub fn install(app: &DesktopApp, installer: &Installer, progress: &Progress) -> 
                 .map_err(|_| tr("No pude arrancar el instalador.", "I couldn't start the installer.").to_string())?;
             let _ = std::fs::remove_file(&file);
             if status.success() {
+                // The install itself worked; if keeping a copy fails, only the rollback is lost.
+                if let Some(dir) = app_dir(app) {
+                    let _ = record(&dir, &installer.file_name, &bytes, &installer.digest, &installer.version);
+                }
                 Ok(())
             } else {
                 Err(format!(
@@ -120,21 +129,144 @@ pub fn install(app: &DesktopApp, installer: &Installer, progress: &Progress) -> 
         }
         Delivery::Portable { folder } => {
             let dir = portable_dir(folder).ok_or_else(|| tr("No encuentro LOCALAPPDATA", "I can't find LOCALAPPDATA").to_string())?;
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
-                if entry.path().extension().is_some_and(|ext| ext == "exe") {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-            std::fs::write(dir.join(&installer.file_name), &bytes).map_err(|e| e.to_string())?;
-            std::fs::write(dir.join(DIGEST_FILE), &installer.digest).map_err(|e| e.to_string())?;
-            std::fs::write(dir.join("version.txt"), &installer.version).map_err(|e| e.to_string())
+            record(&dir, &installer.file_name, &bytes, &installer.digest, &installer.version)
         }
     }
 }
 
-/// The app as it is on this PC, if it is installed.
+/// The folder for an app's program: its portable folder, or its repository name for installers.
+fn app_dir(app: &DesktopApp) -> Option<PathBuf> {
+    match &app.delivery {
+        Delivery::Portable { folder } => portable_dir(folder),
+        Delivery::Installer { .. } => portable_dir(app.repo),
+    }
+}
+
+/// The program files directly in a folder: its .exe files.
+fn programs_in(dir: &std::path::Path) -> Vec<PathBuf> {
+    let Ok(listing) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    listing
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "exe"))
+        .collect()
+}
+
+/// Moves the program now in the folder into `previous/`, replacing the version kept there before.
+fn keep_previous(dir: &std::path::Path) -> Result<(), String> {
+    let programs = programs_in(dir);
+    if programs.is_empty() {
+        return Ok(());
+    }
+    let previous = dir.join(PREVIOUS);
+    let _ = std::fs::remove_dir_all(&previous);
+    std::fs::create_dir_all(&previous).map_err(|e| e.to_string())?;
+    for program in programs {
+        if let Some(name) = program.file_name() {
+            std::fs::rename(&program, previous.join(name)).map_err(|e| e.to_string())?;
+        }
+    }
+    for meta in [VERSION_FILE, DIGEST_FILE] {
+        let _ = std::fs::rename(dir.join(meta), previous.join(meta));
+    }
+    Ok(())
+}
+
+fn write_meta(dir: &std::path::Path, digest: &str, version: &str) -> Result<(), String> {
+    std::fs::write(dir.join(DIGEST_FILE), digest).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(VERSION_FILE), version).map_err(|e| e.to_string())
+}
+
+/// Keeps the program in the folder as the previous version, then stores the new one in its place.
+fn record(dir: &std::path::Path, file_name: &str, bytes: &[u8], digest: &str, version: &str) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    keep_previous(dir)?;
+    std::fs::write(dir.join(file_name), bytes).map_err(|e| e.to_string())?;
+    write_meta(dir, digest, version)
+}
+
+/// The version kept as the previous one, when its program is still there.
+fn previous_version_in(dir: &std::path::Path) -> Option<String> {
+    let previous = dir.join(PREVIOUS);
+    if programs_in(&previous).is_empty() {
+        return None;
+    }
+    let version = std::fs::read_to_string(previous.join(VERSION_FILE)).ok()?;
+    Some(version.trim().to_string()).filter(|version| !version.is_empty())
+}
+
+fn previous_version(app: &DesktopApp) -> Option<String> {
+    previous_version_in(&app_dir(app)?)
+}
+
+/// Swaps the program in the folder with the one kept as previous, versions and digests included.
+fn swap_in(dir: &std::path::Path) -> Result<(), String> {
+    let previous = dir.join(PREVIOUS);
+    let incoming = programs_in(&previous)
+        .into_iter()
+        .next()
+        .ok_or_else(|| tr("No hay una versión anterior guardada.", "There is no previous version saved.").to_string())?;
+    let name = incoming.file_name().ok_or_else(|| tr("Archivo sin nombre.", "File without a name.").to_string())?.to_owned();
+    let read = |path: PathBuf| std::fs::read_to_string(path).unwrap_or_default();
+    let (in_version, in_digest) = (read(previous.join(VERSION_FILE)), read(previous.join(DIGEST_FILE)));
+    let (out_version, out_digest) = (read(dir.join(VERSION_FILE)), read(dir.join(DIGEST_FILE)));
+    // Park the incoming program first, so the outgoing one can take its place in the previous folder.
+    let parked = dir.join("swap.part");
+    std::fs::rename(&incoming, &parked).map_err(|e| e.to_string())?;
+    for program in programs_in(dir) {
+        if let Some(file) = program.file_name() {
+            std::fs::rename(&program, previous.join(file)).map_err(|e| e.to_string())?;
+        }
+    }
+    std::fs::rename(&parked, dir.join(&name)).map_err(|e| e.to_string())?;
+    write_meta(dir, &in_digest, &in_version)?;
+    write_meta(&previous, &out_digest, &out_version)
+}
+
+/// Brings the previous version back. Its installer runs over the current one first; the two then swap
+/// places, so a second rollback returns to the version it left.
+pub fn rollback(app: &DesktopApp) -> Result<(), String> {
+    let dir = app_dir(app).ok_or_else(|| tr("No encuentro LOCALAPPDATA", "I can't find LOCALAPPDATA").to_string())?;
+    let previous = dir.join(PREVIOUS);
+    let program = programs_in(&previous)
+        .into_iter()
+        .next()
+        .ok_or_else(|| tr("No hay una versión anterior guardada.", "There is no previous version saved.").to_string())?;
+    let digest = std::fs::read_to_string(previous.join(DIGEST_FILE)).unwrap_or_default();
+    let bytes = std::fs::read(&program).map_err(|e| e.to_string())?;
+    if !digest_matches(digest.trim(), &bytes) {
+        return Err(tr(
+            "La versión anterior guardada no coincide con su huella; no la uso.",
+            "The saved previous version doesn't match its fingerprint; I won't use it.",
+        )
+        .into());
+    }
+    if matches!(app.delivery, Delivery::Installer { .. }) {
+        let status = Command::new(&program)
+            .arg("/S")
+            .status()
+            .map_err(|_| tr("No pude arrancar el instalador.", "I couldn't start the installer.").to_string())?;
+        if !status.success() {
+            return Err(format!(
+                "{} {}.",
+                tr("El instalador terminó con código", "The installer ended with code"),
+                status.code().unwrap_or(-1)
+            ));
+        }
+    }
+    swap_in(&dir)
+}
+
+/// The app as it is on this PC, if it is installed, and the version a rollback would bring back.
 pub fn installed(app: &DesktopApp) -> Option<Installed> {
+    let mut found = installed_here(app)?;
+    found.previous = previous_version(app);
+    Some(found)
+}
+
+fn installed_here(app: &DesktopApp) -> Option<Installed> {
     match &app.delivery {
         Delivery::Installer { display_name } => uninstall_entry(display_name),
         Delivery::Portable { folder } => {
@@ -149,7 +281,7 @@ pub fn installed(app: &DesktopApp) -> Option<Installed> {
                 None => true,
                 Some(path) => !intact(&dir, path),
             };
-            Some(Installed { version, exe, uninstall: None, damaged })
+            Some(Installed { version, exe, uninstall: None, damaged, previous: None })
         }
     }
 }
@@ -232,7 +364,7 @@ fn uninstall_entry(display_name: &str) -> Option<Installed> {
         let icon: String = entry.get_value("DisplayIcon").unwrap_or_default();
         let exe = PathBuf::from(icon.trim_matches('"').split(',').next().unwrap_or_default());
         let uninstall = entry.get_value::<String, _>("UninstallString").ok();
-        Some(Installed { version, exe: exe.exists().then_some(exe), uninstall, damaged: false })
+        Some(Installed { version, exe: exe.exists().then_some(exe), uninstall, damaged: false, previous: None })
     })
 }
 
@@ -350,5 +482,30 @@ mod tests {
         assert!(digest_matches(&digest, bytes));
         assert!(!digest_matches(&digest, b"otro"));
         assert!(!digest_matches("md5:abc", bytes));
+    }
+
+    #[test]
+    fn a_new_version_keeps_the_old_one_and_a_rollback_swaps_them_back() {
+        fn digest_of(bytes: &[u8]) -> String {
+            format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+        }
+        let dir = std::env::temp_dir().join(format!("maxapps-rollback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        record(&dir, "app-1.exe", b"uno", &digest_of(b"uno"), "1.0.0").unwrap();
+        assert_eq!(previous_version_in(&dir), None);
+        record(&dir, "app-2.exe", b"dos", &digest_of(b"dos"), "2.0.0").unwrap();
+        assert_eq!(previous_version_in(&dir).as_deref(), Some("1.0.0"));
+
+        swap_in(&dir).unwrap();
+        assert_eq!(std::fs::read(dir.join("app-1.exe")).unwrap(), b"uno");
+        assert!(!dir.join("app-2.exe").exists());
+        assert_eq!(std::fs::read_to_string(dir.join(VERSION_FILE)).unwrap(), "1.0.0");
+        assert_eq!(previous_version_in(&dir).as_deref(), Some("2.0.0"));
+
+        swap_in(&dir).unwrap();
+        assert_eq!(std::fs::read(dir.join("app-2.exe")).unwrap(), b"dos");
+        assert_eq!(previous_version_in(&dir).as_deref(), Some("1.0.0"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

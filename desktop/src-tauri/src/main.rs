@@ -51,6 +51,7 @@ enum Action {
     Install,
     Open,
     Uninstall,
+    Rollback,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -190,6 +191,7 @@ fn run(action: Action, name: &str, progress: &Progress) -> Result<String, String
         Action::Install => "install",
         Action::Open => "open",
         Action::Uninstall => "uninstall",
+        Action::Rollback => "rollback",
     };
     match &result {
         Ok(_) => log::record(&format!("{verb} {name}: ok")),
@@ -217,6 +219,10 @@ fn run_action(action: Action, name: &str, progress: &Progress) -> Result<String,
         Action::Uninstall => {
             let installed = install::installed(app).ok_or(tr("La app no está instalada", "The app is not installed"))?;
             install::uninstall(app, &installed)?;
+            Ok(String::new())
+        }
+        Action::Rollback => {
+            install::rollback(app)?;
             Ok(String::new())
         }
     }
@@ -686,6 +692,7 @@ impl Hub {
             Action::Install => format!("{} {name}…", tr("Instalando", "Installing")),
             Action::Open => format!("{} {name}…", tr("Abriendo", "Opening")),
             Action::Uninstall => format!("{} {name}…", tr("Desinstalando", "Uninstalling")),
+            Action::Rollback => format!("{} {name}…", tr("Volviendo a la versión anterior de", "Going back to the previous version of")),
         };
         let progress = Arc::new(Progress::default());
         if matches!(action, Action::Install) {
@@ -705,7 +712,7 @@ impl Hub {
                         hub.message = error;
                         cx.notify();
                     }
-                    Ok(_) if matches!(action, Action::Install | Action::Uninstall) => hub.refresh(cx),
+                    Ok(_) if matches!(action, Action::Install | Action::Uninstall | Action::Rollback) => hub.refresh(cx),
                     Ok(_) => {
                         hub.message = String::new();
                         cx.notify();
@@ -846,7 +853,7 @@ impl Hub {
             let name = row.name.clone();
             let bg = match action {
                 Action::Install => row.accent,
-                Action::Open | Action::Uninstall => 0x1e2b4a,
+                Action::Open | Action::Uninstall | Action::Rollback => 0x1e2b4a,
             };
             card = card.child(
                 div()
@@ -902,6 +909,20 @@ impl Hub {
                         tr("Desinstalar", "Uninstall")
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.uninstall_clicked(name.clone(), cx))),
+            );
+        }
+        if let Some(previous) = row.installed.as_ref().and_then(|installed| installed.previous.clone()) {
+            let name = row.name.clone();
+            card = card.child(
+                div()
+                    .id(("rollback", ix))
+                    .text_xs()
+                    .text_center()
+                    .text_color(rgb(0x7c8db0))
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(rgb(0xe2e8f0)))
+                    .child(format!("{} {previous}", tr("Volver a", "Go back to")))
+                    .on_click(cx.listener(move |this, _, _, cx| this.act(name.clone(), Action::Rollback, cx))),
             );
         }
         card
