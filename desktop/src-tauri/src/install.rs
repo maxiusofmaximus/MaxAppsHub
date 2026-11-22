@@ -134,10 +134,11 @@ fn run_silently(program: &std::path::Path, folder: Option<&std::path::Path>) -> 
 /// The folder a new installer install is told to use. Only when the user chose one and the app is not installed yet:
 /// an update or a rollback stays where the app already is, so it does not leave a second copy behind.
 fn installer_folder(app: &DesktopApp) -> Option<PathBuf> {
-    if crate::shell::install_root_saved().is_none() || installed_here(app).is_some() {
+    let root = crate::shell::install_root_saved()?;
+    if installed_here(app).is_some() {
         return None;
     }
-    app_dir(app)
+    Some(root.join(app.repo))
 }
 
 /// Downloads the release, refuses it unless its digest matches, and installs it.
@@ -151,7 +152,15 @@ pub fn install(app: &DesktopApp, installer: &Installer, progress: &Progress) -> 
         Delivery::Installer { .. } => {
             let file = std::env::temp_dir().join(&installer.file_name);
             std::fs::write(&file, &bytes).map_err(|e| e.to_string())?;
-            let status = run_silently(&file, installer_folder(app).as_deref())
+            let folder = installer_folder(app);
+            crate::log::record(&format!(
+                "install {}: chosen root {:?}, already here {}, installer folder {:?}",
+                app.name,
+                crate::shell::install_root_saved(),
+                installed_here(app).is_some(),
+                folder
+            ));
+            let status = run_silently(&file, folder.as_deref())
                 .map_err(|_| tr("No pude arrancar el instalador.", "I couldn't start the installer.").to_string())?;
             let _ = std::fs::remove_file(&file);
             if status.success() {
@@ -187,11 +196,13 @@ pub fn install(app: &DesktopApp, installer: &Installer, progress: &Progress) -> 
     }
 }
 
-/// The folder for an app's program: its portable folder, or its repository name for installers.
+/// The folder that holds an app's copies: its portable folder, or for installers the default apps folder.
+/// An installer's program goes where its installer puts it, which may be the chosen folder; keeping the copies
+/// there too would let the rollback step move the freshly installed program away.
 fn app_dir(app: &DesktopApp) -> Option<PathBuf> {
     match &app.delivery {
         Delivery::Portable { folder } => portable_dir(folder),
-        Delivery::Installer { .. } => portable_dir(app.repo),
+        Delivery::Installer { .. } => apps_root().map(|root| root.join(app.repo)),
     }
 }
 
@@ -356,6 +367,10 @@ pub fn uninstall(app: &DesktopApp, installed: &Installed) -> Result<(), String> 
                 .map_err(|_| tr("No pude arrancar el desinstalador.", "I couldn't start the uninstaller.").to_string())?;
             if status.success() {
                 remove_leftover_uninstaller(&dir);
+                // The copy kept for rollbacks belongs to the app; once the app is gone it is only leftover.
+                if let Some(kept) = app_dir(app).filter(|kept| *kept != dir) {
+                    let _ = std::fs::remove_dir_all(kept);
+                }
                 Ok(())
             } else {
                 Err(format!(
