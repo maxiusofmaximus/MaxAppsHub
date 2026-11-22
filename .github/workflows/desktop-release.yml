@@ -1,8 +1,9 @@
 name: Desktop release
 
-# Builds the MaxApps Hub on a tag such as desktop-v1.0.1-alpha.2, optionally signs it
-# with SignPath, signs it with the update key, and publishes the GitHub release with
-# the program and its .sig file. The Hub refuses any update whose .sig does not verify.
+# Builds the MaxApps Hub on a tag such as desktop-v1.0.1-alpha.2, optionally signs the
+# program with SignPath, and leaves a DRAFT GitHub release with the program. The update
+# key never goes to GitHub: the maintainer signs locally (see desktop/CODE-SIGNING.md)
+# and publishes the draft. Drafts are not listed to the Hub until they are published.
 
 on:
   push:
@@ -12,7 +13,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  draft:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,10 +44,18 @@ jobs:
           name: unsigned-program
           path: staging/*.exe
 
-      # Authenticode signing through the SignPath Foundation. Runs only once the
-      # SIGNPATH_API_TOKEN secret exists; every signing request is approved by hand.
+      # `secrets` cannot appear in an `if:`, so the check goes through an environment variable.
+      - name: Check whether SignPath is set up
+        id: signpath
+        env:
+          SIGNPATH_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        shell: bash
+        run: echo "enabled=$([ -n "$SIGNPATH_TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      # Authenticode signing through the SignPath Foundation. Every signing request is
+      # approved by hand on SignPath's side.
       - name: Sign with SignPath
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: steps.signpath.outputs.enabled == 'true'
         uses: signpath/github-action-submit-signing-request@v1
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -57,32 +66,16 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: signed
 
-      # Until SignPath is set up the program stays unsigned by Authenticode; the
-      # update key below still protects every update the Hub installs.
+      # Until SignPath is set up the program is not signed by Authenticode; the Hub's
+      # own update check (the Ed25519 .sig added by the maintainer) still applies.
       - name: Keep the built program when SignPath is not set up
-        if: ${{ secrets.SIGNPATH_API_TOKEN == '' }}
+        if: steps.signpath.outputs.enabled != 'true'
         shell: bash
         run: |
           mkdir -p signed
           cp staging/*.exe signed/
 
-      - name: Sign the program with the update key
-        shell: bash
-        env:
-          UPDATE_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          exe="$(ls signed/*.exe)"
-          key="$RUNNER_TEMP/update-key.pem"
-          printf '%s\n' "$UPDATE_KEY" > "$key"
-          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/update-public.pem"
-          openssl pkeyutl -sign -inkey "$key" -rawin -in "$exe" -out "$RUNNER_TEMP/signature.bin"
-          openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/update-public.pem" -rawin \
-            -in "$exe" -sigfile "$RUNNER_TEMP/signature.bin"
-          rm -f "$key"
-          od -An -tx1 -v "$RUNNER_TEMP/signature.bin" | tr -d ' \n' > "$exe.sig"
-
-      - name: Publish the release
+      - name: Create the draft release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -96,5 +89,15 @@ jobs:
           else
             notes=(--generate-notes)
           fi
-          gh release create "$GITHUB_REF_NAME" signed/*.exe signed/*.sig \
+          gh release create "$GITHUB_REF_NAME" signed/*.exe --draft \
             --title "MaxApps Hub $VERSION" "${notes[@]}" "${flags[@]}"
+          {
+            echo "## Draft release $GITHUB_REF_NAME"
+            echo
+            echo "The draft holds the program only. Not published yet: the Hub refuses any update without its .sig."
+            echo "Sign it on the maintainer's computer, then publish. Steps: desktop/CODE-SIGNING.md, section Release process."
+            echo
+            echo '```'
+            sha256sum signed/*.exe
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

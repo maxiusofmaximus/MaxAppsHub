@@ -26,3 +26,10 @@ Ley_de_gases.html
 
 # Desktop build output
 desktop/src-tauri/target/
+
+# Signing material: keys and keystores never belong in the repository
+*.pem
+*.key
+*.jks
+*.keystore
+keystore.properties

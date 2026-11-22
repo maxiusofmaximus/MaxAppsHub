@@ -5,7 +5,7 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 /// The public half of the update key. The private half is kept outside the repository.
-const UPDATE_PUBLIC_KEY: &str = "4be3dc00214a0714c1725dcdc7807ef103d99aa73ba6fc2a16af2b3a386144e9";
+const UPDATE_PUBLIC_KEY: &str = "ecdc16d703c2732e4268e0ccb4cbc804809208a899f5b893d489a464c7a7f162";
 
 /// True when `signature_hex` (64 bytes, hex) is the update key's signature of `bytes`.
 pub fn verified(signature_hex: &str, bytes: &[u8]) -> bool {
@@ -39,7 +39,7 @@ mod tests {
     #[test]
     fn the_built_in_key_accepts_a_release_signed_with_the_private_key() {
         // Made with the update key: openssl pkeyutl -sign -rawin on this exact text.
-        let signature = "49cc256d001bd9d7af2b65237664e1274339670410b3723689032f9748747d9fe9501861a5a1669ffda60d1012c84daa26d08da7341d3911347f4926a2bd4b02";
+        let signature = "cf410a21eb9ad13ffe242f8a52c3852d282132da3c2fe5228c2075067a495a93cef8750e3d2ce5f0e94b7ee800b5c991b6fe76347428a545816c1499dfda5206";
         assert!(verified(signature, b"maxapps-hub-update-test"));
         assert!(!verified(signature, b"maxapps-hub-update-test!"));
     }
