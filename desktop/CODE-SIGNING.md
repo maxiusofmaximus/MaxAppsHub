@@ -44,14 +44,14 @@ KEY="/g/Mi unidad/MaxAppsHub-firma/maxapps-hub-update-signing-key.pem"
 TAG=desktop-v1.0.2
 VER=${TAG#desktop-v}
 DIR=$(mktemp -d)
-gh release download "$TAG" -p "MaxAppsHub-$VER-desktop.exe" -D "$DIR"
+gh release download "$TAG" -R maxiusofmaximus/MaxAppsHub -p "MaxAppsHub-$VER-desktop.exe" -D "$DIR"
 EXE="$DIR/MaxAppsHub-$VER-desktop.exe"
 openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$EXE" -out "$DIR/sig.bin"
 od -An -tx1 "$DIR/sig.bin" | tr -d ' \n' > "$EXE.sig"
 openssl pkey -in "$KEY" -pubout -out "$DIR/pub.pem"
 openssl pkeyutl -verify -pubin -inkey "$DIR/pub.pem" -rawin -in "$EXE" -sigfile "$DIR/sig.bin"
-gh release upload "$TAG" "$EXE.sig"
-gh release edit "$TAG" --draft=false
+gh release upload "$TAG" "$EXE.sig" -R maxiusofmaximus/MaxAppsHub
+gh release edit "$TAG" --draft=false -R maxiusofmaximus/MaxAppsHub
 rm -rf "$DIR"
 ```
 
