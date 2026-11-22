@@ -92,7 +92,7 @@ pub fn download_with(url: &str, progress: &Progress) -> Result<Vec<u8>, String> 
     Ok(bytes)
 }
 
-fn portable_dir(folder: &str) -> Option<PathBuf> {
+pub fn portable_dir(folder: &str) -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA")?;
     Some(PathBuf::from(base).join("MaxAppsHub").join("apps").join(folder))
 }
@@ -129,7 +129,19 @@ pub fn install(app: &DesktopApp, installer: &Installer, progress: &Progress) -> 
         }
         Delivery::Portable { folder } => {
             let dir = portable_dir(folder).ok_or_else(|| tr("No encuentro LOCALAPPDATA", "I can't find LOCALAPPDATA").to_string())?;
-            record(&dir, &installer.file_name, &bytes, &installer.digest, &installer.version)
+            record(&dir, &installer.file_name, &bytes, &installer.digest, &installer.version)?;
+            // The app is installed either way; without the shortcut and the entry it is only harder to find.
+            let entry = crate::system::Entry {
+                folder,
+                name: app.name,
+                version: &installer.version,
+                dir: &dir,
+                program: &dir.join(&installer.file_name),
+            };
+            if let Err(error) = crate::system::register(&entry) {
+                crate::log::record(&format!("shortcut and uninstall entry for {}: {error}", app.name));
+            }
+            Ok(())
         }
     }
 }
@@ -316,6 +328,7 @@ pub fn uninstall(app: &DesktopApp, installed: &Installed) -> Result<(), String> 
         }
         Delivery::Portable { folder } => {
             let dir = portable_dir(folder).ok_or_else(|| tr("No encuentro LOCALAPPDATA", "I can't find LOCALAPPDATA").to_string())?;
+            let _ = crate::system::unregister(folder);
             std::fs::remove_dir_all(&dir)
                 .map_err(|_| tr("No pude borrar la carpeta de la app.", "I couldn't delete the app's folder.").to_string())
         }

@@ -8,6 +8,7 @@ mod registry;
 mod self_update;
 mod shell;
 mod signing;
+mod system;
 mod updates;
 
 use std::collections::VecDeque;
@@ -419,6 +420,29 @@ impl Hub {
             Err(error) => error,
         };
         cx.notify();
+    }
+
+    /// Puts the Hub in its own folder with a shortcut and an uninstaller. Copies a large file, so it runs off the UI thread.
+    fn install_hub_clicked(&mut self, cx: &mut Context<Self>) {
+        if self.busy || system::hub_installed() {
+            return;
+        }
+        self.busy = true;
+        self.message = tr("Instalando el acceso directo…", "Adding the shortcut…").to_string();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { system::install_hub() }).await;
+            this.update(cx, |hub, cx| {
+                hub.busy = false;
+                hub.message = match result {
+                    Ok(()) => tr("Listo: el Hub está en el menú Inicio.", "Done: the Hub is in the Start menu.").to_string(),
+                    Err(error) => error,
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn toggle_auto_update(&mut self, cx: &mut Context<Self>) {
@@ -1321,6 +1345,21 @@ impl Hub {
             )
             .child(
                 setting_row(
+                    tr("Acceso directo y desinstalador", "Shortcut and uninstaller"),
+                    tr(
+                        "Pone el Hub en el menú Inicio y en Aplicaciones instaladas, para quitarlo desde Windows.",
+                        "Puts the Hub in the Start menu and in Installed apps, so Windows can remove it.",
+                    ),
+                    if system::hub_installed() { tr("Instalado", "Installed") } else { tr("Instalar", "Install") },
+                    !system::hub_installed(),
+                )
+                .id("set-hub-shortcut")
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(0x18263f)))
+                .on_click(cx.listener(|this, _, _, cx| this.install_hub_clicked(cx))),
+            )
+            .child(
+                setting_row(
                     tr("Registro de actividad", "Activity log"),
                     tr(
                         "Lo que hizo el Hub y los errores, para pedir ayuda. No sale de tu PC.",
@@ -1344,6 +1383,14 @@ impl Hub {
 }
 
 fn main() {
+    // Started by "Installed apps" in a copy kept beside a program: remove it, without opening the window.
+    // Checked before the single-instance claim, so it also runs while the Hub is open.
+    if std::env::args().any(|arg| arg == "--uninstall") {
+        if let Err(error) = system::uninstall_self() {
+            log::record(&format!("uninstall: failed: {error}"));
+        }
+        return;
+    }
     if matches!(shell::claim_instance(), shell::Launch::Second) {
         return;
     }
