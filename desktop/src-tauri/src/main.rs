@@ -10,13 +10,14 @@ mod shell;
 mod signing;
 mod updates;
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, relative, rgb, size, App, Application, Bounds, Context, Div, FontWeight,
-    Render, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, relative, rgb, size, App, Application, Bounds, Context, Div, FocusHandle,
+    FontWeight, KeyDownEvent, Render, Stateful, TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 
 use i18n::tr;
@@ -270,6 +271,23 @@ struct Hub {
     screen: Screen,
     /// Lists the apps with updates first, then the installed ones; by name otherwise.
     sort_by_status: bool,
+    /// Text typed on the apps screen; shows only the apps whose name contains it.
+    search: String,
+    /// Keeps the keyboard on the window so typing reaches the search box.
+    focus: FocusHandle,
+    /// Apps waiting to be updated, in the order they will run.
+    queue: VecDeque<String>,
+    /// How many apps the queue started with, to number them as they run.
+    queue_total: usize,
+    queue_paused: bool,
+    queue_failed: Vec<String>,
+}
+
+/// What the queue does next: start an app, wait while paused, or finish.
+enum QueueStep {
+    Install(String),
+    Wait,
+    Done,
 }
 
 impl Hub {
@@ -298,6 +316,12 @@ impl Hub {
             transfer: None,
             screen: Screen::Apps,
             sort_by_status: false,
+            search: String::new(),
+            focus: cx.focus_handle(),
+            queue: VecDeque::new(),
+            queue_total: 0,
+            queue_paused: false,
+            queue_failed: Vec::new(),
         };
         hub.refresh(cx);
         cx.spawn(async move |this, cx| loop {
@@ -449,34 +473,140 @@ impl Hub {
             cx.notify();
             return;
         }
+        self.queue_total = names.len();
+        self.queue = names.into();
+        self.queue_paused = false;
+        self.queue_failed.clear();
         self.busy = true;
+        self.run_queue(cx);
+    }
+
+    /// Runs the queue one app at a time. The step is decided on the window's side, so a pause
+    /// or a move made while an app installs takes effect before the next one starts.
+    fn run_queue(&mut self, cx: &mut Context<Self>) {
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let mut failed = Vec::new();
-            for (ix, name) in names.iter().enumerate() {
-                let label = format!("{} {}/{}: {name}…", tr("Actualizando", "Updating"), ix + 1, names.len());
-                this.update(cx, |hub, cx| {
-                    hub.message = label;
-                    cx.notify();
-                })
-                .ok();
-                let job = name.clone();
-                let result = cx
-                    .background_executor()
-                    .spawn(async move { run(Action::Install, &job, &Progress::default()) })
-                    .await;
-                if let Err(error) = result {
-                    failed.push(format!("{name}: {error}"));
+        cx.spawn(async move |this, cx| loop {
+            match this.update(cx, |hub, cx| hub.next_queue_step(cx)) {
+                Ok(QueueStep::Install(name)) => {
+                    let job = name.clone();
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { run(Action::Install, &job, &Progress::default()) })
+                        .await;
+                    if let Err(error) = result {
+                        this.update(cx, |hub, _| hub.queue_failed.push(format!("{name}: {error}"))).ok();
+                    }
                 }
+                Ok(QueueStep::Wait) => cx.background_executor().timer(Duration::from_millis(300)).await,
+                Ok(QueueStep::Done) | Err(_) => break,
             }
-            this.update(cx, |hub, cx| {
-                hub.busy = false;
-                hub.message = failed.join(" · ");
-                hub.refresh(cx);
-            })
-            .ok();
         })
         .detach();
+    }
+
+    fn next_queue_step(&mut self, cx: &mut Context<Self>) -> QueueStep {
+        if self.queue_paused {
+            self.message = tr("En pausa: pulsa Reanudar para seguir", "Paused: press Resume to go on").into();
+            cx.notify();
+            return QueueStep::Wait;
+        }
+        match self.queue.pop_front() {
+            Some(name) => {
+                let position = self.queue_total - self.queue.len();
+                self.message = format!("{} {position}/{}: {name}…", tr("Actualizando", "Updating"), self.queue_total);
+                cx.notify();
+                QueueStep::Install(name)
+            }
+            None => {
+                for failure in &self.queue_failed {
+                    log::record(&format!("update failed: {failure}"));
+                }
+                self.busy = false;
+                self.refresh(cx);
+                QueueStep::Done
+            }
+        }
+    }
+
+    fn move_in_queue(&mut self, ix: usize, up: bool, cx: &mut Context<Self>) {
+        let target = if up { ix.checked_sub(1) } else { Some(ix + 1).filter(|next| *next < self.queue.len()) };
+        if let (Some(target), true) = (target, ix < self.queue.len()) {
+            self.queue.swap(ix, target);
+            cx.notify();
+        }
+    }
+
+    fn toggle_queue_pause(&mut self, cx: &mut Context<Self>) {
+        self.queue_paused = !self.queue_paused;
+        cx.notify();
+    }
+
+    /// The queue as a list the user can reorder, with pause and resume.
+    fn queue_panel(&self, cx: &mut Context<Self>) -> Div {
+        if self.queue_total == 0 || !self.busy {
+            return div();
+        }
+        let waiting: Vec<_> = self
+            .queue
+            .iter()
+            .enumerate()
+            .map(|(ix, name)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child(name.clone()))
+                    .child(
+                        div()
+                            .id(("queue-up", ix))
+                            .px_2()
+                            .rounded_md()
+                            .bg(rgb(0x1e2b4a))
+                            .cursor_pointer()
+                            .child("↑")
+                            .on_click(cx.listener(move |this, _, _, cx| this.move_in_queue(ix, true, cx))),
+                    )
+                    .child(
+                        div()
+                            .id(("queue-down", ix))
+                            .px_2()
+                            .rounded_md()
+                            .bg(rgb(0x1e2b4a))
+                            .cursor_pointer()
+                            .child("↓")
+                            .on_click(cx.listener(move |this, _, _, cx| this.move_in_queue(ix, false, cx))),
+                    )
+            })
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .mb_4()
+            .rounded_md()
+            .bg(rgb(0x0e1a2e))
+            .border_1()
+            .border_color(rgb(0x1c2c47))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(tr("Cola de actualizaciones", "Update queue")))
+                    .child(
+                        div()
+                            .id("queue-pause")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(0x1e2b4a))
+                            .cursor_pointer()
+                            .child(if self.queue_paused { tr("Reanudar", "Resume") } else { tr("Pausar", "Pause") })
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_queue_pause(cx))),
+                    ),
+            )
+            .children(waiting)
     }
 
     /// Alpha builds for one app. Turned off for all apps at once when the global switch is on.
@@ -779,8 +909,17 @@ impl Hub {
 }
 
 impl Render for Hub {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut visible: Vec<&Row> = self.rows.iter().filter(|row| self.filter.matches(row)).collect();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Keys go to the window's focus so the search box receives what is typed.
+        if !self.focus.is_focused(window) {
+            window.focus(&self.focus);
+        }
+        let needle = self.search.to_lowercase();
+        let mut visible: Vec<&Row> = self
+            .rows
+            .iter()
+            .filter(|row| self.filter.matches(row) && row.name.to_lowercase().contains(&needle))
+            .collect();
         let by_status = self.sort_by_status;
         visible.sort_by(|a, b| {
             let rank = |row: &Row| if has_update(row) { 0 } else if row.installed.is_some() { 1 } else { 2 };
@@ -937,6 +1076,8 @@ impl Render for Hub {
                             ),
                     ),
             )
+            .child(self.search_box())
+            .child(self.queue_panel(cx))
             .child(grid)
             .child(div().mt_auto().pt_4().text_sm().text_color(rgb(0x94a3b8)).child(self.message.clone()));
 
@@ -952,8 +1093,49 @@ impl Render for Hub {
             .bg(rgb(0x0b1424))
             .text_color(rgb(0xe2e8f0))
             .text_sm()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                let keys = &event.keystroke;
+                if this.screen != Screen::Apps || keys.modifiers.control || keys.modifiers.platform {
+                    return;
+                }
+                match keys.key.as_str() {
+                    "escape" => this.search.clear(),
+                    "backspace" => {
+                        this.search.pop();
+                    }
+                    _ => {
+                        if let Some(text) = keys.key_char.as_deref().filter(|text| text.chars().all(|c| !c.is_control())) {
+                            this.search.push_str(text);
+                        }
+                    }
+                }
+                cx.notify();
+            }))
             .child(sidebar)
             .child(panel)
+    }
+}
+
+impl Hub {
+    /// The search box on the apps screen. It takes what is typed; Escape clears it.
+    fn search_box(&self) -> Stateful<Div> {
+        let text = if self.search.is_empty() {
+            div().text_color(rgb(0x7c8db0)).child(tr("Buscar por nombre · Esc borra", "Search by name · Esc clears"))
+        } else {
+            div().child(self.search.clone())
+        };
+        div()
+            .id("search")
+            .px_3()
+            .py_2()
+            .mb_4()
+            .min_w(px(260.))
+            .rounded_md()
+            .bg(rgb(0x0e1a2e))
+            .border_1()
+            .border_color(rgb(0x2a3b5f))
+            .child(text)
     }
 }
 
