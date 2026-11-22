@@ -41,6 +41,8 @@ struct Row {
     /// Alpha builds are offered for this app alone.
     alpha_app: bool,
     error: Option<String>,
+    /// The bytes the installed program takes up, counted in the background when the list loads.
+    size: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -91,6 +93,11 @@ fn status_of(app: &registry::DesktopApp) -> Row {
             (None, String::new(), Some(error))
         }
     };
+    let size = installed
+        .as_ref()
+        .and_then(|installed| installed.exe.as_ref())
+        .and_then(|exe| exe.parent())
+        .and_then(install::folder_size);
     Row {
         name: app.name.into(),
         accent: app.accent,
@@ -99,6 +106,7 @@ fn status_of(app: &registry::DesktopApp) -> Row {
         notes,
         alpha_app: shell::alpha_app_on(app.name),
         error,
+        size,
     }
 }
 
@@ -121,6 +129,14 @@ struct Status {
     fg: u32,
     bg: u32,
     button: Option<(&'static str, Action)>,
+}
+
+/// Adds the installed size to a detail line, when it is known.
+fn with_size(detail: String, row: &Row) -> String {
+    match row.size {
+        Some(bytes) => format!("{detail} · {}", install::human_size(bytes)),
+        None => detail,
+    }
 }
 
 fn status(row: &Row) -> Status {
@@ -150,14 +166,14 @@ fn status(row: &Row) -> Status {
         },
         (Some(installed), Some(latest)) if github::newer(latest, &installed.version) => Status {
             label: tr("Actualización", "Update"),
-            detail: format!("{} → {latest}", installed.version),
+            detail: with_size(format!("{} → {latest}", installed.version), row),
             fg: 0xfcd34d,
             bg: 0x3a2a0b,
             button: Some((tr("Actualizar", "Update"), Action::Install)),
         },
         (Some(installed), Some(_)) => Status {
             label: tr("Al día", "Up to date"),
-            detail: format!("{} {}", tr("Versión", "Version"), installed.version),
+            detail: with_size(format!("{} {}", tr("Versión", "Version"), installed.version), row),
             fg: 0x6ee7b7,
             bg: 0x0f2e26,
             button: Some((tr("Abrir", "Open"), Action::Open)),
