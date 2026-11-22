@@ -55,7 +55,9 @@ gh release edit "$TAG" --draft=false
 rm -rf "$DIR"
 ```
 
-The `verify` line must print `Signature Verified Successfully` before the upload. The program is the
+The key is protected by a passphrase kept by the maintainer outside the computer's files. openssl asks
+for it in the terminal each time it is used. The `verify` line must print `Signature Verified Successfully`
+before the upload. The program is the
 one the draft holds, so the signature matches the file the Hub downloads. Before publishing, compare
 the program's SHA-256 with the build log of the workflow run.
 
