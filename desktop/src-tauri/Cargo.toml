@@ -1,6 +1,6 @@
 [package]
 name = "maxapps-hub-desktop"
-version = "1.0.1-alpha.2"
+version = "1.0.1-alpha.3"
 edition = "2021"
 description = "MaxApps Hub para escritorio: instala y actualiza las apps de escritorio publicadas en GitHub"
 
