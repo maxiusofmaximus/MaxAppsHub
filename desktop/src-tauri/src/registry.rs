@@ -158,6 +158,21 @@ pub const APPS: &[DesktopApp] = &[
         requirements: "Windows 10 u 11, 64 bits",
         show_notes: true,
     },
+    DesktopApp {
+        name: "Nexus Engine",
+        description: "Motor de juegos 2D con demo jugable y motor propio sin conexión",
+        description_en: "2D game engine with a playable demo and an offline built-in engine",
+        accent: 0x14b8a6,
+        owner: "maxiusofmaximus",
+        repo: "nexus-engine",
+        tag_prefix: "desktop-v",
+        asset_suffix: "-setup.exe",
+        // Checked on this PC (2026-11-23): NSIS (electron-builder), per user, DisplayName "Nexus Engine".
+        delivery: Delivery::Installer { display_name: "Nexus Engine", kind: InstallerKind::Nsis },
+        languages: &["Español"],
+        requirements: "Windows 10 u 11, 64 bits",
+        show_notes: true,
+    },
 ];
 
 /// The Hub itself. It updates from its own repository and is not listed as an app.
