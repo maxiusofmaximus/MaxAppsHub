@@ -143,6 +143,21 @@ pub const APPS: &[DesktopApp] = &[
         requirements: "Windows 10 u 11, 64 bits",
         show_notes: false,
     },
+    DesktopApp {
+        name: "Kaplay Engine Editor",
+        description: "Editor de mapas generados con semilla para juegos hechos con Kaplay",
+        description_en: "Seeded map editor for games built with Kaplay",
+        accent: 0x22c55e,
+        owner: "maxiusofmaximus",
+        repo: "KaplayEngine",
+        tag_prefix: "desktop-v",
+        asset_suffix: "-setup.exe",
+        // Checked on this PC (2026-11-23): NSIS (electron-builder), per user, DisplayName "Kaplay Engine Editor".
+        delivery: Delivery::Installer { display_name: "Kaplay Engine Editor", kind: InstallerKind::Nsis },
+        languages: &["Español"],
+        requirements: "Windows 10 u 11, 64 bits",
+        show_notes: true,
+    },
 ];
 
 /// The Hub itself. It updates from its own repository and is not listed as an app.
