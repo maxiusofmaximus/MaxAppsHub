@@ -37,27 +37,33 @@ the program. A release without a valid signature is refused.
 
 ### Signing on the maintainer's computer
 
-Run in Git Bash. `KEY` is the private key kept outside the repository; `TAG` is the release tag.
+Run in Git Bash. `KEY` is the private key kept outside the repository, `PASS` its passphrase file next to
+it; `TAG` is the release tag. Paths use the `G:/` form because Git Bash's openssl is a native Windows
+program and does not translate `/g/...` inside `file:`.
 
 ```sh
-KEY="/g/Mi unidad/MaxAppsHub-firma/maxapps-hub-update-signing-key.pem"
+KEY="G:/Mi unidad/MaxAppsHub-firma/maxapps-hub-update-signing-key.pem"
+PASS="file:G:/Mi unidad/MaxAppsHub-firma/maxapps-hub-update-signing-key.contrasena.txt"
 TAG=desktop-v1.0.2
 VER=${TAG#desktop-v}
-DIR=$(mktemp -d)
+DIR=$(cygpath -m "$(mktemp -d)")
 gh release download "$TAG" -R maxiusofmaximus/MaxAppsHub -p "MaxAppsHub-$VER-desktop.exe" -D "$DIR"
 EXE="$DIR/MaxAppsHub-$VER-desktop.exe"
-openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$EXE" -out "$DIR/sig.bin"
+openssl pkeyutl -sign -inkey "$KEY" -passin "$PASS" -rawin -in "$EXE" -out "$DIR/sig.bin" 2>/dev/null
 od -An -tx1 "$DIR/sig.bin" | tr -d ' \n' > "$EXE.sig"
-openssl pkey -in "$KEY" -pubout -out "$DIR/pub.pem"
+openssl pkey -in "$KEY" -passin "$PASS" -pubout -out "$DIR/pub.pem" 2>/dev/null
 openssl pkeyutl -verify -pubin -inkey "$DIR/pub.pem" -rawin -in "$EXE" -sigfile "$DIR/sig.bin"
 gh release upload "$TAG" "$EXE.sig" -R maxiusofmaximus/MaxAppsHub
 gh release edit "$TAG" --draft=false -R maxiusofmaximus/MaxAppsHub
 rm -rf "$DIR"
 ```
 
-The key is protected by a passphrase kept by the maintainer outside the computer's files. openssl asks
-for it in the terminal each time it is used. The `verify` line must print `Signature Verified Successfully`
-before the upload. The program is the
+Since 2026-11-23 (key `bc13b8fb…`) the passphrase is a random value kept in a file in the maintainer's
+Google Drive, next to the key, never in this repository. openssl reads it from that file: never type it,
+paste it or print it, and keep openssl's error output out of logs (`2>/dev/null`). The previous key
+(`ecdc16d7…`) was retired because its passphrase was lost; Hubs built with it refuse updates signed with
+the new key, so they must be reinstalled once by hand. The `verify` line must print
+`Signature Verified Successfully` before the upload. The program is the
 one the draft holds, so the signature matches the file the Hub downloads. Before publishing, compare
 the program's SHA-256 with the build log of the workflow run.
 
