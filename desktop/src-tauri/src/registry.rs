@@ -23,6 +23,12 @@ pub struct DesktopApp {
     /// The release asset whose name ends with this is the program.
     pub asset_suffix: &'static str,
     pub delivery: Delivery,
+    /// The languages the app speaks, by name. Empty when not known: nothing is shown.
+    pub languages: &'static [&'static str],
+    /// Short Windows requirements, e.g. "Windows 10 u 11, 64 bits". Empty when not known: nothing is shown.
+    pub requirements: &'static str,
+    /// Whether the app's page shows "Qué hay de nuevo" from its release notes.
+    pub show_notes: bool,
 }
 
 impl DesktopApp {
@@ -43,6 +49,11 @@ pub const APPS: &[DesktopApp] = &[
         tag_prefix: "desktop-v",
         asset_suffix: "-setup.exe",
         delivery: Delivery::Installer { display_name: "Excubia" },
+        // Spanish only for now; English is a pending translation in the Excubia repo.
+        languages: &["Español"],
+        // From the README of maxiusofmaximus/excubia: "Escritorio (Windows 10/11, 64 bits)".
+        requirements: "Windows 10 u 11, 64 bits",
+        show_notes: true,
     },
     DesktopApp {
         name: "Download Lovable",
@@ -54,6 +65,10 @@ pub const APPS: &[DesktopApp] = &[
         tag_prefix: "v",
         asset_suffix: ".exe",
         delivery: Delivery::Portable { folder: "download-lovable" },
+        languages: &[],
+        requirements: "",
+        // The notes are the publisher's, not news for the user: hidden.
+        show_notes: false,
     },
     DesktopApp {
         name: "ARK ASA Config Manager",
@@ -66,6 +81,26 @@ pub const APPS: &[DesktopApp] = &[
         asset_suffix: "-setup.exe",
         // Not verified on this PC yet: the name the installer writes is assumed.
         delivery: Delivery::Installer { display_name: "ARK ASA Config Manager" },
+        // From frontend/src/i18n/translations.ts of its repo: en, es, de, pt, fr.
+        languages: &["English", "Español", "Deutsch", "Português", "Français"],
+        requirements: "",
+        show_notes: true,
+    },
+    DesktopApp {
+        name: "NMC Total",
+        description: "Monitoreo de red en tiempo real con búsqueda en VirusTotal",
+        description_en: "Real-time network monitoring with VirusTotal lookup",
+        accent: 0xef4444,
+        owner: "maxiusofmaximus",
+        repo: "NMC-Total",
+        tag_prefix: "v",
+        asset_suffix: "-setup.exe",
+        // Not verified on this PC yet: the name the installer writes is assumed.
+        delivery: Delivery::Installer { display_name: "NMC Total" },
+        languages: &[],
+        requirements: "",
+        // Its release notes are developer notes (versions, registry, test text): hidden.
+        show_notes: false,
     },
 ];
 
@@ -80,8 +115,31 @@ pub const SELF_APP: DesktopApp = DesktopApp {
     tag_prefix: "desktop-v",
     asset_suffix: "-desktop.exe",
     delivery: Delivery::Portable { folder: "maxapps-hub" },
+    languages: &[],
+    requirements: "",
+    show_notes: false,
 };
 
 pub fn find(name: &str) -> Option<&'static DesktopApp> {
     APPS.iter().find(|app| app.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_listed_app_names_its_repo_and_asset_and_nmc_total_is_listed() {
+        for app in APPS {
+            assert!(!app.repo.is_empty(), "{} has no repo", app.name);
+            assert!(!app.asset_suffix.is_empty(), "{} has no asset suffix", app.name);
+        }
+        let nmc = find("NMC Total").expect("NMC Total is listed");
+        assert_eq!(nmc.owner, "maxiusofmaximus");
+    }
+
+    #[test]
+    fn download_lovable_hides_its_notes() {
+        assert!(!find("Download Lovable").expect("Download Lovable is listed").show_notes);
+    }
 }

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use gpui::Window;
 use crate::i18n::tr;
+use crate::palette::{self, SystemLook, FALLBACK_ACCENT};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -145,6 +146,32 @@ pub fn english_on() -> bool {
 
 pub fn save_english(on: bool) -> Result<(), String> {
     save_value("language", serde_json::json!(if on { "en" } else { "es" }))
+}
+
+/// The palette the user picked; "system" unless they chose another one in Settings.
+pub fn palette_saved() -> String {
+    settings()["palette"].as_str().unwrap_or("system").to_string()
+}
+
+pub fn save_palette(id: &str) -> Result<(), String> {
+    save_value("palette", serde_json::json!(id))
+}
+
+/// Windows' light or dark mode and accent color, for the Sistema palette.
+pub fn system_look() -> SystemLook {
+    // AppsUseLightTheme is 1 in light mode; a missing value means light.
+    let dark = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
+        .and_then(|key| key.get_value::<u32, _>("AppsUseLightTheme"))
+        .is_ok_and(|light| light == 0);
+    let dwm = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Software\\Microsoft\\Windows\\DWM");
+    let read = |name: &str| dwm.as_ref().ok().and_then(|key| key.get_value::<u32, _>(name).ok());
+    // AccentColor is ABGR; older Windows only has ColorizationColor, which is ARGB.
+    let accent = match read("AccentColor") {
+        Some(abgr) => palette::accent_from_abgr(abgr),
+        None => read("ColorizationColor").map_or(FALLBACK_ACCENT, |argb| argb & 0x00ff_ffff),
+    };
+    SystemLook { dark, accent }
 }
 
 /// Closing the window keeps the Hub in the tray unless the user chose otherwise.
