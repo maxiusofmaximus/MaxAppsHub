@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::github::Installer;
 use crate::i18n::tr;
-use crate::registry::{Delivery, DesktopApp};
+use crate::registry::{Delivery, DesktopApp, InstallerKind};
 
 /// An app found on this PC.
 #[derive(Clone)]
@@ -115,18 +115,42 @@ fn pick_dir(default_root: &std::path::Path, chosen_root: Option<&std::path::Path
     }
 }
 
-/// Runs an installer or uninstaller silently. With a chosen folder, `/D=` goes last and unquoted, as NSIS reads it.
-fn run_silently(program: &std::path::Path, folder: Option<&std::path::Path>) -> std::io::Result<std::process::ExitStatus> {
-    let mut command = Command::new(program);
-    command.arg("/S");
+const INNO_SILENT: [&str; 3] = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"];
+
+/// The arguments that run an installer silently. With a chosen folder it comes last: `/D=` unquoted for NSIS, `/DIR="..."` for Inno.
+fn install_args(kind: InstallerKind, folder: Option<&std::path::Path>) -> Vec<String> {
+    let mut args: Vec<String> = match kind {
+        InstallerKind::Nsis => vec!["/S".into()],
+        InstallerKind::Inno => INNO_SILENT.iter().map(|flag| flag.to_string()).collect(),
+    };
     if let Some(folder) = folder {
+        args.push(match kind {
+            InstallerKind::Nsis => format!("/D={}", folder.display()),
+            InstallerKind::Inno => format!("/DIR=\"{}\"", folder.display()),
+        });
+    }
+    args
+}
+
+/// The arguments that run an uninstaller silently. NSIS also gets its folder (`_?=`) to run in place.
+fn uninstall_args(kind: InstallerKind, dir: &std::path::Path) -> Vec<String> {
+    match kind {
+        InstallerKind::Nsis => vec!["/S".into(), format!("_?={}", dir.display())],
+        InstallerKind::Inno => INNO_SILENT.iter().map(|flag| flag.to_string()).collect(),
+    }
+}
+
+/// Runs an installer silently. Each argument goes to the command line raw, as the installer reads it.
+fn run_silently(program: &std::path::Path, kind: InstallerKind, folder: Option<&std::path::Path>) -> std::io::Result<std::process::ExitStatus> {
+    let mut command = Command::new(program);
+    for arg in install_args(kind, folder) {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            command.raw_arg(format!("/D={}", folder.display()));
+            command.raw_arg(arg);
         }
         #[cfg(not(windows))]
-        command.arg(format!("/D={}", folder.display()));
+        command.arg(arg);
     }
     command.status()
 }
@@ -149,7 +173,7 @@ pub fn install(app: &DesktopApp, installer: &Installer, progress: &Progress) -> 
         return Err(tr("La huella de la descarga no coincide; no la instalé.", "The download's fingerprint doesn't match; I didn't install it.").into());
     }
     match &app.delivery {
-        Delivery::Installer { .. } => {
+        Delivery::Installer { kind, .. } => {
             let file = std::env::temp_dir().join(&installer.file_name);
             std::fs::write(&file, &bytes).map_err(|e| e.to_string())?;
             let folder = installer_folder(app);
@@ -160,7 +184,7 @@ pub fn install(app: &DesktopApp, installer: &Installer, progress: &Progress) -> 
                 installed_here(app).is_some(),
                 folder
             ));
-            let status = run_silently(&file, folder.as_deref())
+            let status = run_silently(&file, *kind, folder.as_deref())
                 .map_err(|_| tr("No pude arrancar el instalador.", "I couldn't start the installer.").to_string())?;
             let _ = std::fs::remove_file(&file);
             if status.success() {
@@ -307,8 +331,8 @@ pub fn rollback(app: &DesktopApp) -> Result<(), String> {
         )
         .into());
     }
-    if matches!(app.delivery, Delivery::Installer { .. }) {
-        let status = run_silently(&program, installer_folder(app).as_deref())
+    if let Delivery::Installer { kind, .. } = &app.delivery {
+        let status = run_silently(&program, *kind, installer_folder(app).as_deref())
             .map_err(|_| tr("No pude arrancar el instalador.", "I couldn't start the installer.").to_string())?;
         if !status.success() {
             return Err(format!(
@@ -330,7 +354,7 @@ pub fn installed(app: &DesktopApp) -> Option<Installed> {
 
 fn installed_here(app: &DesktopApp) -> Option<Installed> {
     match &app.delivery {
-        Delivery::Installer { display_name } => uninstall_entry(display_name),
+        Delivery::Installer { display_name, .. } => uninstall_entry(display_name),
         Delivery::Portable { folder } => {
             let dir = portable_dir(folder)?;
             let version = std::fs::read_to_string(dir.join("version.txt")).ok()?.trim().to_string();
@@ -351,18 +375,16 @@ fn installed_here(app: &DesktopApp) -> Option<Installed> {
 /// Removes the app: its own silent uninstaller for installers, the folder for portable apps.
 pub fn uninstall(app: &DesktopApp, installed: &Installed) -> Result<(), String> {
     match &app.delivery {
-        Delivery::Installer { .. } => {
+        Delivery::Installer { kind, .. } => {
             let command = installed
                 .uninstall
                 .as_deref()
                 .ok_or_else(|| tr("No encuentro el desinstalador", "I can't find the uninstaller").to_string())?;
             let (program, args) = split_command(command);
-            // NSIS uninstallers take /S for silent and _?= (their folder) to run in place.
             let dir = program.parent().map(PathBuf::from).unwrap_or_default();
             let status = Command::new(&program)
                 .args(&args)
-                .arg("/S")
-                .arg(format!("_?={}", dir.display()))
+                .args(uninstall_args(*kind, &dir))
                 .status()
                 .map_err(|_| tr("No pude arrancar el desinstalador.", "I couldn't start the uninstaller.").to_string())?;
             if status.success() {
@@ -592,5 +614,28 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("app-2.exe")).unwrap(), b"dos");
         assert_eq!(previous_version_in(&dir).as_deref(), Some("1.0.0"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nsis_installs_as_before_with_and_without_a_chosen_folder() {
+        use std::path::Path;
+        assert_eq!(install_args(InstallerKind::Nsis, None), vec!["/S"]);
+        assert_eq!(
+            install_args(InstallerKind::Nsis, Some(Path::new(r"C:\Mis Apps\Excubia"))),
+            vec!["/S", r"/D=C:\Mis Apps\Excubia"]
+        );
+        assert_eq!(uninstall_args(InstallerKind::Nsis, Path::new(r"C:\Apps\Excubia")), vec!["/S", r"_?=C:\Apps\Excubia"]);
+    }
+
+    #[test]
+    fn inno_installs_with_its_own_flags_with_and_without_a_chosen_folder() {
+        use std::path::Path;
+        let silent = vec!["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"];
+        assert_eq!(install_args(InstallerKind::Inno, None), silent);
+        assert_eq!(
+            install_args(InstallerKind::Inno, Some(Path::new(r"C:\Mis Apps\ConsoleEngine"))),
+            vec!["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", r#"/DIR="C:\Mis Apps\ConsoleEngine""#]
+        );
+        assert_eq!(uninstall_args(InstallerKind::Inno, Path::new(r"C:\Apps\ConsoleEngine")), silent);
     }
 }

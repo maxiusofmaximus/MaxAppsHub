@@ -2,11 +2,22 @@
 
 /// How a release reaches the PC.
 pub enum Delivery {
-    /// The release is a Windows installer, run silently (`/S`). The app is found
+    /// The release is a Windows installer, run silently with the flags of its `kind`. The app is found
     /// through its entry in the Windows uninstall list.
-    Installer { display_name: &'static str },
+    Installer { display_name: &'static str, kind: InstallerKind },
     /// The release is one program file, kept in the Hub's own folder.
     Portable { folder: &'static str },
+}
+
+/// Which installer framework built the release: each one has its own silent flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstallerKind {
+    /// NSIS: `/S`, and `/D=` for the folder.
+    Nsis,
+    /// Inno Setup: `/VERYSILENT`, and `/DIR=` for the folder.
+    // Not built by any listed app yet; it is for the ConsoleEngine installer.
+    #[allow(dead_code)]
+    Inno,
 }
 
 /// One desktop app the Hub can install, update and open.
@@ -48,7 +59,7 @@ pub const APPS: &[DesktopApp] = &[
         repo: "excubia",
         tag_prefix: "desktop-v",
         asset_suffix: "-setup.exe",
-        delivery: Delivery::Installer { display_name: "Excubia" },
+        delivery: Delivery::Installer { display_name: "Excubia", kind: InstallerKind::Nsis },
         // Spanish only for now; English is a pending translation in the Excubia repo.
         languages: &["Español"],
         // From the README of maxiusofmaximus/excubia: "Escritorio (Windows 10/11, 64 bits)".
@@ -80,7 +91,7 @@ pub const APPS: &[DesktopApp] = &[
         tag_prefix: "v",
         asset_suffix: "-setup.exe",
         // Not verified on this PC yet: the name the installer writes is assumed.
-        delivery: Delivery::Installer { display_name: "ARK ASA Config Manager" },
+        delivery: Delivery::Installer { display_name: "ARK ASA Config Manager", kind: InstallerKind::Nsis },
         // From frontend/src/i18n/translations.ts of its repo: en, es, de, pt, fr.
         languages: &["English", "Español", "Deutsch", "Português", "Français"],
         requirements: "",
@@ -96,7 +107,7 @@ pub const APPS: &[DesktopApp] = &[
         tag_prefix: "v",
         asset_suffix: "-setup.exe",
         // Not verified on this PC yet: the name the installer writes is assumed.
-        delivery: Delivery::Installer { display_name: "NMC Total" },
+        delivery: Delivery::Installer { display_name: "NMC Total", kind: InstallerKind::Nsis },
         languages: &[],
         requirements: "",
         // Its release notes are developer notes (versions, registry, test text): hidden.
