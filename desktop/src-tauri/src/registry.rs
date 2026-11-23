@@ -15,8 +15,6 @@ pub enum InstallerKind {
     /// NSIS: `/S`, and `/D=` for the folder.
     Nsis,
     /// Inno Setup: `/VERYSILENT`, and `/DIR=` for the folder.
-    // Not built by any listed app yet; it is for the ConsoleEngine installer.
-    #[allow(dead_code)]
     Inno,
 }
 
@@ -111,6 +109,38 @@ pub const APPS: &[DesktopApp] = &[
         languages: &[],
         requirements: "",
         // Its release notes are developer notes (versions, registry, test text): hidden.
+        show_notes: false,
+    },
+    DesktopApp {
+        name: "ConsoleEngine Editor",
+        description: "Editor de escenas para juegos de terminal hechos con ConsoleEngine (.NET 8)",
+        description_en: "Scene editor for terminal games built with ConsoleEngine (.NET 8)",
+        accent: 0x8b5cf6,
+        owner: "maxiusofmaximus",
+        repo: "ConsoleEngine",
+        // `v*` tags publish NuGet packages; desktop builds use their own prefix.
+        tag_prefix: "desktop-v",
+        asset_suffix: "-setup.exe",
+        // Checked on this PC (2026-11-23): Inno Setup, per user, DisplayName "ConsoleEngine Editor".
+        delivery: Delivery::Installer { display_name: "ConsoleEngine Editor", kind: InstallerKind::Inno },
+        languages: &[],
+        requirements: "Windows 10 u 11, 64 bits",
+        show_notes: false,
+    },
+    DesktopApp {
+        name: "Atlas OS",
+        description: "Sistema operativo para ingeniería con agentes de IA: misiones, bus del kernel y diario",
+        description_en: "Operating system for AI agent engineering: missions, kernel bus and journal",
+        accent: 0x3b82f6,
+        owner: "maxiusofmaximus",
+        repo: "atlas-os",
+        // `v*` tags are the Android releases; desktop builds use their own prefix.
+        tag_prefix: "desktop-v",
+        asset_suffix: "-setup.exe",
+        // Checked on this PC (2026-11-23): NSIS, per user, DisplayName "Atlas OS".
+        delivery: Delivery::Installer { display_name: "Atlas OS", kind: InstallerKind::Nsis },
+        languages: &[],
+        requirements: "Windows 10 u 11, 64 bits",
         show_notes: false,
     },
 ];
