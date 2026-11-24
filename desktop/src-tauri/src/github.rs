@@ -1,8 +1,14 @@
 //! Finds the newest stable desktop release of an app and its installer.
 
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
 use serde_json::Value;
 
 use crate::i18n::tr;
+
+/// The release list last read per API URL, with the ETag GitHub sent for it. Kept for this session.
+static SAVED: Mutex<BTreeMap<String, (String, Value)>> = Mutex::new(BTreeMap::new());
 use crate::registry::DesktopApp;
 
 /// The installer of the newest stable desktop release.
@@ -100,6 +106,8 @@ fn compare(a: &str, b: &str) -> std::cmp::Ordering {
 #[derive(Debug, PartialEq)]
 pub enum NoInstaller {
     OnlyAlpha,
+    /// GitHub's anonymous quota is spent; the text says when to try again.
+    Limited(String),
     Failed(String),
 }
 
@@ -110,7 +118,7 @@ impl std::fmt::Display for NoInstaller {
                 "Solo hay versión alfa: actívala en Ajustes › Avanzado",
                 "Only an alpha version: turn it on in Settings › Advanced",
             )),
-            NoInstaller::Failed(text) => f.write_str(text),
+            NoInstaller::Limited(text) | NoInstaller::Failed(text) => f.write_str(text),
         }
     }
 }
@@ -184,6 +192,71 @@ pub fn choose(app: &DesktopApp, releases: &Value, include_prerelease: bool) -> R
     )))
 }
 
+fn unreachable() -> NoInstaller {
+    NoInstaller::Failed(tr("No pude consultar GitHub. Revisa la conexión.", "I couldn't reach GitHub. Check the connection.").into())
+}
+
+fn unreadable() -> NoInstaller {
+    NoInstaller::Failed(tr("GitHub devolvió una respuesta que no entiendo", "GitHub sent a reply I can't read").into())
+}
+
+/// Why GitHub refused a request: the anonymous quota is spent (403 or 429 with
+/// `x-ratelimit-remaining: 0`), or anything else, which reads as a failed connection.
+fn refused(status: u16, remaining: Option<&str>, reset: Option<&str>) -> NoInstaller {
+    if !matches!(status, 403 | 429) || remaining.map(str::trim) != Some("0") {
+        return unreachable();
+    }
+    let when = reset.and_then(|reset| reset.trim().parse::<u64>().ok()).map(|reset| clock_at(reset, local_offset_secs()));
+    NoInstaller::Limited(match when {
+        Some(at) => tr(
+            "GitHub ha limitado las consultas por ahora. Vuelve a intentarlo a las HH:MM.",
+            "GitHub is limiting requests for now. Try again at HH:MM.",
+        )
+        .replace("HH:MM", &at),
+        None => tr(
+            "GitHub ha limitado las consultas por ahora. Vuelve a intentarlo más tarde.",
+            "GitHub is limiting requests for now. Try again later.",
+        )
+        .into(),
+    })
+}
+
+/// The local `HH:MM` of the Unix second `reset`, `offset_secs` ahead of UTC.
+fn clock_at(reset: u64, offset_secs: i64) -> String {
+    let day = ((reset % 86_400) as i64 + offset_secs).rem_euclid(86_400);
+    format!("{:02}:{:02}", day / 3_600, day % 3_600 / 60)
+}
+
+/// The local clock's offset from UTC in seconds, now, daylight saving included.
+#[cfg(windows)]
+fn local_offset_secs() -> i64 {
+    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+    // SAFETY: the struct is plain data and the call only fills it in.
+    let mut zone: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
+    let daylight = unsafe { GetTimeZoneInformation(&mut zone) } == 2; // TIME_ZONE_ID_DAYLIGHT
+    let bias = zone.Bias + if daylight { zone.DaylightBias } else { zone.StandardBias };
+    // Bias counts the minutes that UTC is ahead of local time.
+    -i64::from(bias) * 60
+}
+
+#[cfg(not(windows))]
+fn local_offset_secs() -> i64 {
+    0
+}
+
+/// The release list for one reply: on a 304 the saved list is still current and the body is not read.
+fn reply_list(
+    status: u16,
+    saved: Option<(String, Value)>,
+    body: impl FnOnce() -> Result<Value, NoInstaller>,
+) -> Result<Value, NoInstaller> {
+    match (status, saved) {
+        (304, Some((_, releases))) => Ok(releases),
+        (304, None) => Err(unreadable()),
+        _ => body(),
+    }
+}
+
 /// Fetches the release list and picks the installer, alphas included only when the
 /// user turned that channel on. Blocking: call it off the UI thread.
 pub fn latest_installer(app: &DesktopApp) -> Result<Installer, NoInstaller> {
@@ -191,15 +264,26 @@ pub fn latest_installer(app: &DesktopApp) -> Result<Installer, NoInstaller> {
         "{}/repos/{}/{}/releases?per_page=30",
         api_base(), app.owner, app.repo
     );
-    let releases: Value = ureq::get(&url)
+    let saved = SAVED.lock().ok().and_then(|saved| saved.get(&url).cloned());
+    let mut request = ureq::get(&url)
         .set("User-Agent", "maxapps-hub-desktop")
-        .set("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(|_| {
-            NoInstaller::Failed(tr("No pude consultar GitHub. Revisa la conexión.", "I couldn't reach GitHub. Check the connection.").into())
-        })?
-        .into_json()
-        .map_err(|_| NoInstaller::Failed(tr("GitHub devolvió una respuesta que no entiendo", "GitHub sent a reply I can't read").into()))?;
+        .set("Accept", "application/vnd.github+json");
+    if let Some((etag, _)) = &saved {
+        // GitHub does not count a 304 against the hourly quota.
+        request = request.set("If-None-Match", etag);
+    }
+    let response = match request.call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(status, refusal)) => {
+            return Err(refused(status, refusal.header("x-ratelimit-remaining"), refusal.header("x-ratelimit-reset")));
+        }
+        Err(_) => return Err(unreachable()),
+    };
+    let etag = response.header("etag").map(str::to_string);
+    let releases = reply_list(response.status(), saved, || response.into_json().map_err(|_| unreadable()))?;
+    if let (Some(etag), Ok(mut cache)) = (etag, SAVED.lock()) {
+        cache.insert(url, (etag, releases.clone()));
+    }
     choose(app, &releases, crate::shell::alpha_channel_on() || crate::shell::alpha_app_on(app.name))
 }
 
@@ -323,5 +407,31 @@ mod tests {
         let mut no_digest = release("desktop-v2.3.910", false, "Excubia-2.3.910-setup.exe");
         no_digest["assets"][0]["digest"] = Value::Null;
         assert!(choose(excubia(), &json!([no_digest]), false).is_err());
+    }
+
+    #[test]
+    fn the_reset_header_becomes_the_local_clock_time() {
+        // 1700000000 is 2023-11-14T22:13:20Z.
+        assert_eq!(clock_at(1_700_000_000, 0), "22:13");
+        assert_eq!(clock_at(1_700_000_000, 3_600), "23:13");
+        assert_eq!(clock_at(1_700_000_000, -18_000), "17:13");
+        assert_eq!(clock_at(1_700_000_000, 7_200), "00:13");
+    }
+
+    #[test]
+    fn a_spent_quota_is_a_limit_not_a_connection_failure() {
+        assert!(matches!(refused(403, Some("0"), Some("1700000000")), NoInstaller::Limited(text) if text.contains(':')));
+        assert!(matches!(refused(429, Some("0"), None), NoInstaller::Limited(_)));
+        // A 403 with quota left, or a missing header, is still the connection message.
+        assert!(matches!(refused(403, Some("12"), None), NoInstaller::Failed(_)));
+        assert!(matches!(refused(500, Some("0"), None), NoInstaller::Failed(_)));
+    }
+
+    #[test]
+    fn a_304_gives_back_the_saved_list_without_reading_a_body() {
+        let saved = json!([release("desktop-v2.3.910", false, "Excubia-2.3.910-setup.exe")]);
+        let kept = reply_list(304, Some(("\"abc\"".into(), saved.clone())), || panic!("body read on 304")).expect("saved list");
+        assert_eq!(kept, saved);
+        assert!(reply_list(304, None, || panic!("body read on 304")).is_err());
     }
 }

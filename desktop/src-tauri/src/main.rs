@@ -286,7 +286,14 @@ fn run_action(action: Action, name: &str, progress: &Progress) -> Result<String,
     let app = registry::find(name).ok_or(tr("App desconocida", "Unknown app"))?;
     match action {
         Action::Install => {
-            let installer = github::latest_installer(app).map_err(|error| error.to_string())?;
+            let installer = github::latest_installer(app).map_err(|error| {
+                if let github::NoInstaller::Limited(text) = &error {
+                    if let Ok(mut limit) = progress.limit.lock() {
+                        *limit = Some(text.clone());
+                    }
+                }
+                error.to_string()
+            })?;
             install::install(app, &installer, progress)?;
             Ok(String::new())
         }
@@ -472,6 +479,8 @@ struct Hub {
     transfer: Option<(String, Arc<Progress>)>,
     /// The app whose last install failed; its button offers to try again.
     failed_install: Option<String>,
+    /// What the failed install says instead of the plain sentence: GitHub's quota message. Empty otherwise.
+    failed_note: String,
     screen: Screen,
     /// The cards whose "Detalles" are open.
     expanded: Vec<String>,
@@ -533,6 +542,7 @@ impl Hub {
             confirming: None,
             transfer: None,
             failed_install: None,
+            failed_note: String::new(),
             screen: Screen::Apps,
             expanded: Vec::new(),
             details_open: false,
@@ -988,6 +998,7 @@ impl Hub {
         }
         self.busy = true;
         self.failed_install = None;
+        self.failed_note.clear();
         self.message = match action {
             Action::Install => format!("{} {name}…", tr("Instalando", "Installing")),
             Action::Open => format!("{} {name}…", tr("Abriendo", "Opening")),
@@ -1012,12 +1023,17 @@ impl Hub {
                 match result {
                     // A failed install gets the plain sentence and a retry button; the technical text is in the log.
                     Err(_) if matches!(action, Action::Install) && !watch.cancel.load(Ordering::SeqCst) => {
+                        // GitHub's quota message says when to come back; any other failure gets the plain sentence.
+                        let limit = watch.limit.lock().ok().and_then(|mut limit| limit.take());
                         hub.failed_install = Some(name);
-                        hub.message = tr(
-                            "No se pudo instalar. Revisa tu conexión e inténtalo otra vez. El detalle técnico está en el registro de actividad.",
-                            "Installation failed. Check your connection and try again. Technical details are in the activity log.",
-                        )
-                        .into();
+                        hub.failed_note = limit.clone().unwrap_or_default();
+                        hub.message = limit.unwrap_or_else(|| {
+                            tr(
+                                "No se pudo instalar. Revisa tu conexión e inténtalo otra vez. El detalle técnico está en el registro de actividad.",
+                                "Installation failed. Check your connection and try again. Technical details are in the activity log.",
+                            )
+                            .into()
+                        });
                         cx.notify();
                     }
                     Err(error) => {
@@ -1108,11 +1124,15 @@ impl Hub {
             return Status {
                 chip: tr("Error", "Error"),
                 chip_colors: p.tone(p.err),
-                line: tr(
-                    "No se pudo instalar. Revisa tu conexión e inténtalo otra vez. El detalle técnico está en el registro de actividad.",
-                    "Installation failed. Check your connection and try again. Technical details are in the activity log.",
-                )
-                .into(),
+                line: if self.failed_note.is_empty() {
+                    tr(
+                        "No se pudo instalar. Revisa tu conexión e inténtalo otra vez. El detalle técnico está en el registro de actividad.",
+                        "Installation failed. Check your connection and try again. Technical details are in the activity log.",
+                    )
+                    .into()
+                } else {
+                    self.failed_note.clone().into()
+                },
                 line_color: p.err,
                 button: Button { label: tr("Reintentar", "Try again").into(), cta: Some(Cta::Act(Action::Install)) },
             };

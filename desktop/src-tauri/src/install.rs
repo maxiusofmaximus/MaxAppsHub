@@ -5,6 +5,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
@@ -54,12 +55,14 @@ pub fn digest_matches(digest: &str, bytes: &[u8]) -> bool {
 }
 
 /// Live state of one download, shared with the window: bytes so far, the total
-/// (0 when the server did not say) and a request to stop.
+/// (0 when the server did not say), a request to stop, and GitHub's quota message when
+/// the install could not read the releases (that text is safe to show as it is).
 #[derive(Default)]
 pub struct Progress {
     pub done: AtomicU64,
     pub total: AtomicU64,
     pub cancel: AtomicBool,
+    pub limit: Mutex<Option<String>>,
 }
 
 pub fn download(url: &str) -> Result<Vec<u8>, String> {
