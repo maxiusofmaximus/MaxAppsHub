@@ -26,6 +26,7 @@ use gpui::{
 use i18n::tr;
 use install::{Installed, Progress};
 use palette::{ink_on, Palette};
+use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR};
 
 /// The Hub's icon for the sidebar, 64 px: the approved icon scaled down.
 const BRAND_ICON: &[u8] = include_bytes!("../icons/hub-64.png");
@@ -54,6 +55,8 @@ struct Row {
     notes: String,
     /// Alpha builds are offered for this app alone.
     alpha_app: bool,
+    /// The app has only alpha builds and the alpha channel is off: not a failed check.
+    alpha_only: bool,
     /// The bytes the installed program takes up, counted in the background when the list loads.
     size: Option<u64>,
     /// The app's languages and Windows requirements, from the registry. Empty means not shown.
@@ -235,11 +238,11 @@ fn full_folder() -> String {
 
 fn status_of(app: &registry::DesktopApp) -> Row {
     let installed = install::installed(app);
-    let (latest, download, notes) = match github::latest_installer(app) {
-        Ok(installer) => (Some(installer.version), Some(installer.size), installer.notes),
+    let (latest, download, notes, alpha_only) = match github::latest_installer(app) {
+        Ok(installer) => (Some(installer.version), Some(installer.size), installer.notes, false),
         Err(error) => {
             log::record(&format!("could not read the releases of {}: {error}", app.name));
-            (None, None, String::new())
+            (None, None, String::new(), error == github::NoInstaller::OnlyAlpha)
         }
     };
     let size = installed
@@ -255,6 +258,7 @@ fn status_of(app: &registry::DesktopApp) -> Row {
         download,
         notes,
         alpha_app: shell::alpha_app_on(app.name),
+        alpha_only,
         size,
         languages: app.languages,
         requirements: app.requirements,
@@ -282,7 +286,7 @@ fn run_action(action: Action, name: &str, progress: &Progress) -> Result<String,
     let app = registry::find(name).ok_or(tr("App desconocida", "Unknown app"))?;
     match action {
         Action::Install => {
-            let installer = github::latest_installer(app)?;
+            let installer = github::latest_installer(app).map_err(|error| error.to_string())?;
             install::install(app, &installer, progress)?;
             Ok(String::new())
         }
@@ -478,6 +482,8 @@ struct Hub {
     advanced_open: bool,
     /// Lists the apps with updates first, then the installed ones; by name otherwise.
     sort_by_status: bool,
+    /// Every app's name in the order the grid shows them. Fixed by `reorder`, so cards stay put after an install.
+    order: Vec<String>,
     /// Text typed on the library; shows only the apps whose name or description contains it.
     search: String,
     /// Where the library list was scrolled, kept while an app's detail is open.
@@ -533,6 +539,7 @@ impl Hub {
             notes_open: false,
             advanced_open: false,
             sort_by_status: true,
+            order: Vec::new(),
             search: String::new(),
             scroll: ScrollHandle::new(),
             palette_id: shell::palette_saved(),
@@ -951,7 +958,12 @@ impl Hub {
                 })
                 .await;
             this.update(cx, |hub, cx| {
+                // Only the first load fixes the order: later checks (after an install) must not move the cards.
+                let first = hub.rows.is_empty();
                 hub.rows = rows;
+                if first {
+                    hub.reorder();
+                }
                 hub.self_update = update;
                 hub.busy = false;
                 hub.message = String::new();
@@ -960,6 +972,14 @@ impl Hub {
             .ok();
         })
         .detach();
+    }
+
+    /// Fixes the grid's order by the current sort. Called when the user enters the library or presses
+    /// a sort button, so the card under the cursor does not change after an install.
+    fn reorder(&mut self) {
+        let mut all: Vec<&Row> = self.rows.iter().collect();
+        sort_rows(&mut all, self.sort_by_status);
+        self.order = all.iter().map(|row| row.name.clone()).collect();
     }
 
     fn act(&mut self, name: String, action: Action, cx: &mut Context<Self>) {
@@ -1135,6 +1155,13 @@ impl Hub {
                 line_color: p.ok,
                 button: Button { label: tr("Abrir", "Open").into(), cta: Some(Cta::Act(Action::Open)) },
             },
+            _ if row.alpha_only => Status {
+                chip: tr("Solo alfa", "Alpha only"),
+                chip_colors: p.tone(p.muted),
+                line: github::NoInstaller::OnlyAlpha.to_string(),
+                line_color: p.text_secondary,
+                button: Button { label: tr("No disponible", "Unavailable").into(), cta: None },
+            },
             _ => Status {
                 chip: tr("No se pudo comprobar", "Could not check"),
                 chip_colors: p.tone(p.muted),
@@ -1161,6 +1188,7 @@ impl Hub {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.filter = filter;
                 this.screen = Screen::Apps;
+                this.reorder();
                 cx.notify();
             }))
     }
@@ -1410,7 +1438,7 @@ impl Hub {
             .iter()
             .filter(|row| self.filter.matches(row) && matches_search(row, &needle))
             .collect();
-        sort_rows(&mut visible, self.sort_by_status);
+        visible.sort_by_key(|row| self.order.iter().position(|name| *name == row.name).unwrap_or(usize::MAX));
         let count = visible.len();
         let cards: Vec<Div> = visible
             .into_iter()
@@ -1454,6 +1482,7 @@ impl Hub {
                         sort_button("sort-status", tr("Por estado", "By status"), self.sort_by_status, p).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.sort_by_status = true;
+                                this.reorder();
                                 cx.notify();
                             }),
                         ),
@@ -1462,6 +1491,7 @@ impl Hub {
                         sort_button("sort-name", tr("Por nombre", "By name"), !self.sort_by_status, p).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.sort_by_status = false;
+                                this.reorder();
                                 cx.notify();
                             }),
                         ),
@@ -1526,6 +1556,7 @@ impl Hub {
         let back = link("back", format!("← {}", tr("Todas las apps", "All apps")), p.text_secondary).on_click(cx.listener(
             |this, _, _, cx| {
                 this.screen = Screen::Apps;
+                this.reorder();
                 cx.notify();
             },
         ));
@@ -1987,6 +2018,16 @@ impl Render for Hub {
     }
 }
 
+/// A Windows error box with `text`: the only way to tell the user why the window did not open.
+fn show_error_box(text: &str) {
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let (text, title) = (wide(text), wide("MaxApps Hub"));
+    // SAFETY: both buffers are NUL-terminated and live until the call returns; no owner window.
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_ICONERROR);
+    }
+}
+
 fn main() {
     // Started by "Installed apps" in a copy kept beside a program: remove it, without opening the window.
     // Checked before the single-instance claim, so it also runs while the Hub is open.
@@ -2033,7 +2074,19 @@ fn main() {
                 cx.new(|cx| Hub::new(cx, close_to_tray))
             },
         )
-        .expect("no se pudo abrir MaxApps Hub");
+        .unwrap_or_else(|error| {
+            // A release build has no console: without this box the Hub would just vanish.
+            let text = format!(
+                "{}\n\n{} {error}",
+                tr(
+                    "MaxApps Hub no pudo abrir su ventana. Suele deberse al controlador gráfico (DirectX): actualiza el controlador de la tarjeta gráfica y vuelve a abrir el Hub.",
+                    "MaxApps Hub could not open its window. This is usually the graphics driver (DirectX): update the graphics card driver and open the Hub again.",
+                ),
+                tr("Detalle:", "Details:"),
+            );
+            show_error_box(&text);
+            std::process::exit(2);
+        });
         if !background {
             cx.activate(true);
         }
@@ -2059,6 +2112,7 @@ mod tests {
             download: None,
             notes: String::new(),
             alpha_app: false,
+            alpha_only: false,
             size: None,
             languages: &[],
             requirements: "",

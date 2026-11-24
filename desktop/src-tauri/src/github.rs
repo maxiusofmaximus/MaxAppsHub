@@ -96,33 +96,61 @@ fn compare(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
+/// Why no installer was picked: only alphas exist while the alpha channel is off, or a real failure.
+#[derive(Debug, PartialEq)]
+pub enum NoInstaller {
+    OnlyAlpha,
+    Failed(String),
+}
+
+impl std::fmt::Display for NoInstaller {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NoInstaller::OnlyAlpha => f.write_str(tr(
+                "Solo hay versión alfa: actívala en Ajustes › Avanzado",
+                "Only an alpha version: turn it on in Settings › Advanced",
+            )),
+            NoInstaller::Failed(text) => f.write_str(text),
+        }
+    }
+}
+
+/// The release asset that is this app's installer, if the release has one.
+fn installer_asset<'a>(release: &'a Value, app: &DesktopApp) -> Option<&'a Value> {
+    release["assets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|asset| asset["name"].as_str().unwrap_or_default().ends_with(app.asset_suffix))
+}
+
 /// Picks the newest release of the app with an installer. Pre-releases (alphas) are
 /// only considered when `include_prerelease` is set. GitHub lists releases newest
 /// first, so the first match wins.
-pub fn choose(app: &DesktopApp, releases: &Value, include_prerelease: bool) -> Result<Installer, String> {
-    let releases = releases
-        .as_array()
-        .ok_or_else(|| tr("GitHub no devolvió una lista de versiones", "GitHub didn't return a list of versions").to_string())?;
+pub fn choose(app: &DesktopApp, releases: &Value, include_prerelease: bool) -> Result<Installer, NoInstaller> {
+    let releases = releases.as_array().ok_or_else(|| {
+        NoInstaller::Failed(tr("GitHub no devolvió una lista de versiones", "GitHub didn't return a list of versions").into())
+    })?;
+    let mut alpha_hidden = false;
     for release in releases {
         let tag = release["tag_name"].as_str().unwrap_or_default();
-        let allowed = !release["draft"].as_bool().unwrap_or(true)
-            && (include_prerelease || !release["prerelease"].as_bool().unwrap_or(true));
-        if !allowed || !tag.starts_with(app.tag_prefix) {
+        if release["draft"].as_bool().unwrap_or(true) || !tag.starts_with(app.tag_prefix) {
             continue;
         }
-        let asset = release["assets"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|asset| asset["name"].as_str().unwrap_or_default().ends_with(app.asset_suffix));
-        let Some(asset) = asset else { continue };
+        if release["prerelease"].as_bool().unwrap_or(true) && !include_prerelease {
+            alpha_hidden |= installer_asset(release, app).is_some();
+            continue;
+        }
+        let Some(asset) = installer_asset(release, app) else { continue };
         let digest = asset["digest"].as_str().unwrap_or_default();
         if !digest.starts_with("sha256:") {
-            return Err(tr(
-                "GitHub no dio la huella del instalador; no lo instalo sin comprobarla",
-                "GitHub gave no fingerprint for the installer; I won't install it unchecked",
-            )
-            .into());
+            return Err(NoInstaller::Failed(
+                tr(
+                    "GitHub no dio la huella del instalador; no lo instalo sin comprobarla",
+                    "GitHub gave no fingerprint for the installer; I won't install it unchecked",
+                )
+                .into(),
+            ));
         }
         let file_name = asset["name"].as_str().unwrap_or_default();
         let signature_name = format!("{file_name}.sig");
@@ -144,13 +172,21 @@ pub fn choose(app: &DesktopApp, releases: &Value, include_prerelease: bool) -> R
             notes: release["body"].as_str().unwrap_or_default().to_string(),
         });
     }
+    if alpha_hidden {
+        return Err(NoInstaller::OnlyAlpha);
+    }
     let kind = if include_prerelease { tr("publicada", "published") } else { tr("estable", "stable") };
-    Err(format!("{} {kind} {} {}", tr("No encontré una versión", "I found no"), tr("de", "version of"), app.name))
+    Err(NoInstaller::Failed(format!(
+        "{} {kind} {} {}",
+        tr("No encontré una versión", "I found no"),
+        tr("de", "version of"),
+        app.name
+    )))
 }
 
 /// Fetches the release list and picks the installer, alphas included only when the
 /// user turned that channel on. Blocking: call it off the UI thread.
-pub fn latest_installer(app: &DesktopApp) -> Result<Installer, String> {
+pub fn latest_installer(app: &DesktopApp) -> Result<Installer, NoInstaller> {
     let url = format!(
         "{}/repos/{}/{}/releases?per_page=30",
         api_base(), app.owner, app.repo
@@ -159,9 +195,11 @@ pub fn latest_installer(app: &DesktopApp) -> Result<Installer, String> {
         .set("User-Agent", "maxapps-hub-desktop")
         .set("Accept", "application/vnd.github+json")
         .call()
-        .map_err(|_| tr("No pude consultar GitHub. Revisa la conexión.", "I couldn't reach GitHub. Check the connection.").to_string())?
+        .map_err(|_| {
+            NoInstaller::Failed(tr("No pude consultar GitHub. Revisa la conexión.", "I couldn't reach GitHub. Check the connection.").into())
+        })?
         .into_json()
-        .map_err(|_| tr("GitHub devolvió una respuesta que no entiendo", "GitHub sent a reply I can't read").to_string())?;
+        .map_err(|_| NoInstaller::Failed(tr("GitHub devolvió una respuesta que no entiendo", "GitHub sent a reply I can't read").into()))?;
     choose(app, &releases, crate::shell::alpha_channel_on() || crate::shell::alpha_app_on(app.name))
 }
 
@@ -217,6 +255,15 @@ mod tests {
         assert!(newer("1.0.1-alpha.1", "1.0.0"));
         assert!(!newer("1.0.1-alpha.1", "1.0.1"));
         assert!(!newer("1.0.1-alpha.1", "1.0.1-alpha.1"));
+    }
+
+    #[test]
+    fn an_app_with_only_alphas_says_so_instead_of_failing() {
+        let alpha = json!([release("desktop-v2.3.911-alpha.2", true, "Excubia-2.3.911-alpha.2-setup.exe")]);
+        assert_eq!(choose(excubia(), &alpha, false).unwrap_err(), NoInstaller::OnlyAlpha);
+        assert!(choose(excubia(), &alpha, true).is_ok());
+        // No release at all is a real failure, not the alpha message.
+        assert!(matches!(choose(excubia(), &json!([]), false), Err(NoInstaller::Failed(_))));
     }
 
     #[test]
