@@ -132,14 +132,15 @@ fn installer_asset<'a>(release: &'a Value, app: &DesktopApp) -> Option<&'a Value
         .find(|asset| asset["name"].as_str().unwrap_or_default().ends_with(app.asset_suffix))
 }
 
-/// Picks the newest release of the app with an installer. Pre-releases (alphas) are
-/// only considered when `include_prerelease` is set. GitHub lists releases newest
-/// first, so the first match wins.
+/// Picks the highest-version release of the app with an installer. Pre-releases (alphas)
+/// are only considered when `include_prerelease` is set. GitHub lists releases by tag
+/// name, not by date, so every release is compared with `compare` and the highest wins.
 pub fn choose(app: &DesktopApp, releases: &Value, include_prerelease: bool) -> Result<Installer, NoInstaller> {
     let releases = releases.as_array().ok_or_else(|| {
         NoInstaller::Failed(tr("GitHub no devolvió una lista de versiones", "GitHub didn't return a list of versions").into())
     })?;
     let mut alpha_hidden = false;
+    let mut best: Option<(&Value, &Value, &str)> = None;
     for release in releases {
         let tag = release["tag_name"].as_str().unwrap_or_default();
         if release["draft"].as_bool().unwrap_or(true) || !tag.starts_with(app.tag_prefix) {
@@ -150,46 +151,52 @@ pub fn choose(app: &DesktopApp, releases: &Value, include_prerelease: bool) -> R
             continue;
         }
         let Some(asset) = installer_asset(release, app) else { continue };
-        let digest = asset["digest"].as_str().unwrap_or_default();
-        if !digest.starts_with("sha256:") {
-            return Err(NoInstaller::Failed(
-                tr(
-                    "GitHub no dio la huella del instalador; no lo instalo sin comprobarla",
-                    "GitHub gave no fingerprint for the installer; I won't install it unchecked",
-                )
-                .into(),
-            ));
+        let version = &tag[app.tag_prefix.len()..];
+        if best.map_or(true, |(_, _, top)| compare(version, top) == std::cmp::Ordering::Greater) {
+            best = Some((release, asset, version));
         }
-        let file_name = asset["name"].as_str().unwrap_or_default();
-        let signature_name = format!("{file_name}.sig");
-        let signature_url = release["assets"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|asset| asset["name"].as_str() == Some(signature_name.as_str()))
-            .and_then(|asset| asset["browser_download_url"].as_str())
-            .map(str::to_string);
-        return Ok(Installer {
-            version: tag[app.tag_prefix.len()..].to_string(),
-            file_name: file_name.to_string(),
-            download_url: asset["browser_download_url"].as_str().unwrap_or_default().to_string(),
-            digest: digest.to_string(),
-            size: asset["size"].as_u64().unwrap_or(0),
-            published_at: release["published_at"].as_str().unwrap_or_default().to_string(),
-            signature_url,
-            notes: release["body"].as_str().unwrap_or_default().to_string(),
-        });
     }
-    if alpha_hidden {
-        return Err(NoInstaller::OnlyAlpha);
+    let Some((release, asset, version)) = best else {
+        if alpha_hidden {
+            return Err(NoInstaller::OnlyAlpha);
+        }
+        let kind = if include_prerelease { tr("publicada", "published") } else { tr("estable", "stable") };
+        return Err(NoInstaller::Failed(format!(
+            "{} {kind} {} {}",
+            tr("No encontré una versión", "I found no"),
+            tr("de", "version of"),
+            app.name
+        )));
+    };
+    let digest = asset["digest"].as_str().unwrap_or_default();
+    if !digest.starts_with("sha256:") {
+        return Err(NoInstaller::Failed(
+            tr(
+                "GitHub no dio la huella del instalador; no lo instalo sin comprobarla",
+                "GitHub gave no fingerprint for the installer; I won't install it unchecked",
+            )
+            .into(),
+        ));
     }
-    let kind = if include_prerelease { tr("publicada", "published") } else { tr("estable", "stable") };
-    Err(NoInstaller::Failed(format!(
-        "{} {kind} {} {}",
-        tr("No encontré una versión", "I found no"),
-        tr("de", "version of"),
-        app.name
-    )))
+    let file_name = asset["name"].as_str().unwrap_or_default();
+    let signature_name = format!("{file_name}.sig");
+    let signature_url = release["assets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|asset| asset["name"].as_str() == Some(signature_name.as_str()))
+        .and_then(|asset| asset["browser_download_url"].as_str())
+        .map(str::to_string);
+    Ok(Installer {
+        version: version.to_string(),
+        file_name: file_name.to_string(),
+        download_url: asset["browser_download_url"].as_str().unwrap_or_default().to_string(),
+        digest: digest.to_string(),
+        size: asset["size"].as_u64().unwrap_or(0),
+        published_at: release["published_at"].as_str().unwrap_or_default().to_string(),
+        signature_url,
+        notes: release["body"].as_str().unwrap_or_default().to_string(),
+    })
 }
 
 fn unreachable() -> NoInstaller {
@@ -329,6 +336,41 @@ mod tests {
         ]);
         let installer = choose(excubia(), &releases, true).expect("installer");
         assert_eq!(installer.version, "2.3.911-alpha.2");
+    }
+
+    #[test]
+    fn the_highest_version_wins_whatever_order_github_lists_them_in() {
+        // The order GitHub really sends: it sorts by tag name, so alpha.10 comes after alpha.5.
+        let releases = json!([
+            release("desktop-v2.3.911-alpha.9", true, "Excubia-2.3.911-alpha.9-setup.exe"),
+            release("desktop-v2.3.911-alpha.8", true, "Excubia-2.3.911-alpha.8-setup.exe"),
+            release("desktop-v2.3.911-alpha.5", true, "Excubia-2.3.911-alpha.5-setup.exe"),
+            release("desktop-v2.3.911-alpha.10", true, "Excubia-2.3.911-alpha.10-setup.exe"),
+            release("desktop-v2.3.911-alpha.4", true, "Excubia-2.3.911-alpha.4-setup.exe"),
+        ]);
+        let installer = choose(excubia(), &releases, true).expect("installer");
+        assert_eq!(installer.version, "2.3.911-alpha.10");
+    }
+
+    #[test]
+    fn with_the_alpha_channel_on_a_stable_release_beats_its_alphas() {
+        let releases = json!([
+            release("desktop-v2.3.911-alpha.10", true, "Excubia-2.3.911-alpha.10-setup.exe"),
+            release("desktop-v2.3.911", false, "Excubia-2.3.911-setup.exe"),
+            release("desktop-v2.3.911-alpha.9", true, "Excubia-2.3.911-alpha.9-setup.exe"),
+        ]);
+        let installer = choose(excubia(), &releases, true).expect("installer");
+        assert_eq!(installer.version, "2.3.911");
+    }
+
+    #[test]
+    fn with_the_alpha_channel_off_higher_alphas_are_ignored() {
+        let releases = json!([
+            release("desktop-v2.3.911-alpha.10", true, "Excubia-2.3.911-alpha.10-setup.exe"),
+            release("desktop-v2.3.910", false, "Excubia-2.3.910-setup.exe"),
+        ]);
+        let installer = choose(excubia(), &releases, false).expect("installer");
+        assert_eq!(installer.version, "2.3.910");
     }
 
     #[test]
