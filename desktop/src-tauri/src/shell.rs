@@ -24,45 +24,98 @@ static MAIN_WINDOW: AtomicIsize = AtomicIsize::new(0);
 /// Set by the listener thread when a second start asks for the window.
 static SHOW_REQUEST: AtomicBool = AtomicBool::new(false);
 
+/// Set by the listener thread when a newer start asks this Hub to close.
+static QUIT_REQUEST: AtomicBool = AtomicBool::new(false);
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub enum Launch {
     First,
-    /// Another Hub already runs; it was asked to show itself.
-    Second,
+    /// Another Hub already runs and this start must exit. A non-empty text is a message to show first.
+    Second(String),
 }
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// One Hub per user session. A second start wakes the first one and exits.
+fn running_file() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("MaxAppsHub").join("running.txt"))
+}
+
+/// The version the running Hub wrote when it started; None when it predates this check.
+fn running_version() -> Option<String> {
+    std::fs::read_to_string(running_file()?).ok().map(|text| text.trim().to_string())
+}
+
+/// A start replaces the running Hub only when it is newer. A Hub that predates this check
+/// writes no version, so it counts as older.
+pub fn should_replace(own: &str, running: Option<&str>) -> bool {
+    running.map_or(true, |running| crate::github::newer(own, running))
+}
+
+/// One Hub per user session. A newer start asks the running Hub to close and takes over;
+/// an equal or older one wakes the running Hub and exits.
 pub fn claim_instance() -> Launch {
     let mutex_name = wide("Local\\MaxAppsHub.Single");
-    let event_name = wide("Local\\MaxAppsHub.Show");
-    // After a self-update the previous copy may still be closing: wait for it.
-    let mut retries = if std::env::args().any(|arg| arg == "--updated") { 100 } else { 0 };
+    let show_name = wide("Local\\MaxAppsHub.Show");
+    let quit_name = wide("Local\\MaxAppsHub.Quit");
     unsafe {
-        let (mutex, already) = loop {
-            let mutex = CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
-            let already = GetLastError() == ERROR_ALREADY_EXISTS;
-            if !already || retries == 0 {
-                break (mutex, already);
-            }
-            CloseHandle(mutex);
-            retries -= 1;
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        let event = CreateEventW(std::ptr::null(), 0, 0, event_name.as_ptr());
+        let mut mutex = CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
+        let mut already = GetLastError() == ERROR_ALREADY_EXISTS;
         if already {
-            SetEvent(event);
-            CloseHandle(event);
-            return Launch::Second;
+            let running = running_version();
+            if !should_replace(VERSION, running.as_deref()) {
+                let show = CreateEventW(std::ptr::null(), 0, 0, show_name.as_ptr());
+                SetEvent(show);
+                CloseHandle(show);
+                CloseHandle(mutex);
+                return Launch::Second(String::new());
+            }
+            let quit = CreateEventW(std::ptr::null(), 0, 0, quit_name.as_ptr());
+            SetEvent(quit);
+            CloseHandle(quit);
+            // The running copy closes within moments (after a self-update it may still be closing); wait up to 10 s.
+            for _ in 0..100 {
+                CloseHandle(mutex);
+                std::thread::sleep(Duration::from_millis(100));
+                mutex = CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
+                already = GetLastError() == ERROR_ALREADY_EXISTS;
+                if !already {
+                    break;
+                }
+            }
+            if already {
+                CloseHandle(mutex);
+                // Hubs older than this check ignore the close request; the user closes them from the tray.
+                let version = running.unwrap_or_else(|| tr("anterior", "older").to_string());
+                let text = format!(
+                    "{} ({} {version}); {} {VERSION}.",
+                    tr("MaxApps Hub ya está abierto", "MaxApps Hub is already open"),
+                    tr("versión", "version"),
+                    tr("ciérralo desde la bandeja para abrir la", "close it from the tray to open"),
+                );
+                return Launch::Second(text);
+            }
         }
-        // Handles are plain numbers; the listener owns this one for the process lifetime.
-        let event = event as isize;
+        let show = CreateEventW(std::ptr::null(), 0, 0, show_name.as_ptr());
+        let quit = CreateEventW(std::ptr::null(), 0, 0, quit_name.as_ptr());
+        // Handles are plain numbers; the listeners own them for the process lifetime.
+        let (show, quit) = (show as isize, quit as isize);
         std::thread::spawn(move || loop {
-            WaitForSingleObject(event as HANDLE, INFINITE);
+            WaitForSingleObject(show as HANDLE, INFINITE);
             SHOW_REQUEST.store(true, Ordering::SeqCst);
         });
+        std::thread::spawn(move || loop {
+            WaitForSingleObject(quit as HANDLE, INFINITE);
+            QUIT_REQUEST.store(true, Ordering::SeqCst);
+        });
+        if let Some(file) = running_file() {
+            if let Some(dir) = file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(file, VERSION);
+        }
         // The mutex handle is kept open on purpose: it marks this instance as the running one.
         let _ = mutex;
         Launch::First
@@ -71,6 +124,26 @@ pub fn claim_instance() -> Launch {
 
 pub fn take_show_request() -> bool {
     SHOW_REQUEST.swap(false, Ordering::SeqCst)
+}
+
+/// True once when a newer start has asked this Hub to close.
+pub fn take_quit_request() -> bool {
+    QUIT_REQUEST.swap(false, Ordering::SeqCst)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_replace;
+
+    #[test]
+    fn a_newer_start_asks_the_running_hub_to_close_and_an_older_or_equal_one_does_not() {
+        assert!(should_replace("1.0.1-alpha.8", Some("1.0.1-alpha.7")));
+        assert!(should_replace("1.0.1-alpha.10", Some("1.0.1-alpha.5")));
+        assert!(should_replace("1.0.1", Some("1.0.1-alpha.8")));
+        assert!(should_replace("1.0.1-alpha.8", None));
+        assert!(!should_replace("1.0.1-alpha.8", Some("1.0.1-alpha.8")));
+        assert!(!should_replace("1.0.1-alpha.7", Some("1.0.1-alpha.8")));
+    }
 }
 
 /// Identifies the Hub to Windows notifications; registered once so toasts show its name.

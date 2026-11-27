@@ -587,6 +587,11 @@ impl Hub {
         if self.transfer.is_some() {
             cx.notify();
         }
+        // A newer start asked us to close. Not while an install runs: the newer start then times out and says so.
+        if shell::take_quit_request() && !self.busy && self.transfer.is_none() && self.queue.is_empty() {
+            self.quit(cx);
+            return;
+        }
         if shell::take_show_request() {
             shell::show_window();
         }
@@ -2057,7 +2062,10 @@ fn main() {
         }
         return;
     }
-    if matches!(shell::claim_instance(), shell::Launch::Second) {
+    if let shell::Launch::Second(text) = shell::claim_instance() {
+        if !text.is_empty() {
+            show_error_box(&text);
+        }
         return;
     }
     self_update::clean_previous();
